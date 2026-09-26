@@ -18,6 +18,21 @@ import {
   randInt,
   say,
 } from "./util.js";
+import { buildable, isWater, makeTerrain, reviveTerrain, rollWeather, seasonOf, SEASON_DAYS, WEATHERS } from "./terrain.js";
+import {
+  FAITHS,
+  declareHolyWar,
+  faithDay,
+  faithTick,
+  foundReligion,
+  godSeen,
+  grieve,
+  infidel,
+  preachResult,
+  religionOf,
+  shoot,
+  soldierTask,
+} from "./crusade.js";
 
 export const DAY = 30;
 export const ADULT = 16;
@@ -27,13 +42,15 @@ const SPEED = 70; // walking speed, world px per second
 
 // ---------------------------------------------------------------- creation
 
-export function createWorld(count = 26) {
+export function createWorld() {
+  const W = 3600;
+  const H = 1700;
   const w = {
-    version: 1,
+    version: 2,
     t: 0,
     day: 0,
-    W: 3200,
-    H: 1500,
+    W,
+    H,
     nextId: 1,
     people: [],
     houses: [],
@@ -41,17 +58,137 @@ export function createWorld(count = 26) {
     rocks: [],
     coins: [],
     colonies: [],
+    religions: [],
+    armies: [],
+    arrows: [],
     effects: [],
     events: [],
+    announcements: [],
     names: {},
     shake: 0,
-    stats: { born: 0, died: 0, married: 0, wars: 0 },
+    weather: { type: "clear", until: DAY * 0.6 },
+    season: "spring",
+    terrain: makeTerrain(W, H, Math.floor(Math.random() * 1e9)),
+    stats: { born: 0, died: 0, married: 0, wars: 0, crusades: 0 },
   };
-  for (let i = 0; i < 55; i++) addTree(w, rand(80, w.W - 80), rand(120, w.H - 60), randInt(1, 4));
-  for (let i = 0; i < 9; i++)
-    w.rocks.push({ id: w.nextId++, x: rand(150, w.W - 150), y: rand(160, w.H - 100), r: rand(26, 40) });
-  for (let i = 0; i < count; i++) makePerson(w, rand(300, w.W - 300), rand(250, w.H - 150));
+  const t = w.terrain;
+  w.holy = { x: t.holy.x, y: t.holy.y, r: t.holy.r, name: "شهر مقدس", owner: null, contender: null, progress: 0 };
+  // Forests are thick, meadows thin.
+  for (let i = 0; i < 400 && w.trees.length < 95; i++) {
+    const f = pick(t.forests);
+    const x = chance(0.75) ? f.x + rand(-f.r, f.r) : rand(60, W - 60);
+    const y = chance(0.75) ? f.y + rand(-f.r, f.r) * 0.6 : rand(160, H - 50);
+    if (x < 50 || x > W - 50 || y < 215 || y > H - 40 || !buildable(t, x, y, 20)) continue;
+    if (w.trees.some((o) => Math.hypot(o.x - x, (o.y - y) * 1.5) < 55)) continue;
+    addTree(w, x, y, randInt(1, 4));
+  }
+  // Rocks with gold in them, mostly on the hills.
+  for (const h of t.hills.slice(0, 7)) w.rocks.push({ id: w.nextId++, x: h.x + rand(-20, 20), y: h.y + rand(-5, 15), r: rand(28, 40) });
+  for (let i = 0; i < 4; i++) {
+    const x = rand(200, W - 200);
+    const y = rand(250, H - 120);
+    if (buildable(t, x, y, 40)) w.rocks.push({ id: w.nextId++, x, y, r: rand(26, 36) });
+  }
+  // Two peoples on the two banks of the river, each with its faith and town.
+  settle(w, { x: W * 0.2, y: H * 0.4 }, FAITHS[0], 15);
+  settle(w, { x: W * 0.86, y: H * 0.64 }, FAITHS[1], 15);
+  // And a few wanderers in between, who believe in nothing yet.
+  for (let i = 0; i < 4; i++) {
+    const s = spotNear(w, t.holy.x + rand(-300, 300), t.holy.y + rand(-300, 300), 200);
+    if (s) makePerson(w, s.x, s.y, { traits: { ...randomTraits(), faith: rand(0.1, 0.5) } });
+  }
   log(w, "🌍 دنیا آفریده شد. حالا تو خدایی.", null, "god");
+  announce(w, "🌍 دو قوم در دو سوی رود؛ و شهر مقدس در میانه، بی‌صاحب…", null, "god");
+  return w;
+}
+
+const randomTraits = () => ({ kind: rand(), aggr: rand(), greed: rand(), social: rand(), faith: rand(), brave: rand(), work: rand() });
+
+// A town: people, a tribe, couples with houses, a temple half built.
+function settle(w, at, faith, n) {
+  // Clear the ground for the town.
+  w.trees = w.trees.filter((t) => Math.hypot(t.x - at.x, (t.y - at.y) * 1.3) > 330);
+  const people = [];
+  for (let i = 0; i < n; i++) {
+    const s = spotNear(w, at.x + rand(-200, 200), at.y + rand(-140, 140), 120);
+    if (!s) continue;
+    people.push(makePerson(w, s.x, s.y, { traits: { ...randomTraits(), faith: rand(0.35, 1) }, age: rand(ADULT, 38) }));
+  }
+  const religion = foundReligion(w, null, faith);
+  for (const p of people) p.religion = religion.id;
+  const prophet = [...people].sort((a, b) => b.traits.faith - a.traits.faith)[0];
+  prophet.prophet = true;
+  prophet.traits.faith = Math.max(prophet.traits.faith, 0.9);
+  religion.prophet = prophet.id;
+  const leader = [...people].sort((a, b) => b.traits.brave + b.traits.social - (a.traits.brave + a.traits.social))[0];
+  const tribe = foundColony(w, leader, people.slice(0, 10), true);
+  tribe.religion = religion.id;
+  // Some couples, some homes.
+  const singles = people.filter((p) => p.colony === tribe.id);
+  for (let i = 0; i + 1 < singles.length && i < 6; i += 2) {
+    const a = singles[i];
+    const b = singles[i + 1];
+    a.spouse = b.id;
+    b.spouse = a.id;
+    a.rel[b.id] = b.rel[a.id] = 70;
+  }
+  for (const p of singles) {
+    if (p.home || (p.spouse && byId(w, p.spouse).home)) {
+      if (p.spouse) p.home = byId(w, p.spouse).home;
+      continue;
+    }
+    if (chance(0.25)) continue;
+    const s = findSpot(w, at.x, at.y, 320, 110);
+    if (!s) continue;
+    const h = newBuilding(w, "house", s, p);
+    h.built = 1;
+    h.level = chance(0.3) ? 2 : 1;
+    p.home = h.id;
+    if (p.spouse) byId(w, p.spouse).home = h.id;
+  }
+  for (const p of people) for (const q of people) if (p !== q && !p.rel[q.id]) p.rel[q.id] = randInt(0, 25);
+  const s = findSpot(w, at.x, at.y, 200, 140);
+  if (s) {
+    const temple = newBuilding(w, "temple", s, leader);
+    temple.religion = religion.id;
+    temple.built = 0.6;
+  }
+}
+
+function newBuilding(w, kind, at, owner) {
+  const hp = kind === "keep" ? 300 : kind === "temple" ? 180 : 100;
+  const b = { id: w.nextId++, kind, x: at.x, y: at.y, owner: owner?.id ?? null, colony: owner?.colony ?? null, built: 0, hp, maxHp: hp, fire: 0, ruined: false, level: 1 };
+  w.houses.push(b);
+  return b;
+}
+
+// A free spot of good ground near a point, away from other things.
+export function findSpot(w, x0, y0, r, gap = 110) {
+  const t = w.terrain;
+  for (let i = 0; i < 40; i++) {
+    const x = clamp(x0 + rand(-r, r), 80, w.W - 80);
+    const y = clamp(y0 + rand(-r, r) * 0.65, 240, w.H - 60);
+    if (!buildable(t, x, y, 40)) continue;
+    const clear =
+      w.houses.every((h) => Math.hypot(h.x - x, (h.y - y) * 1.6) > (h.kind === "house" ? gap : gap + 40)) &&
+      w.trees.every((o) => Math.hypot(o.x - x, (o.y - y) * 1.6) > 50) &&
+      w.rocks.every((o) => Math.hypot(o.x - x, (o.y - y) * 1.6) > 70);
+    if (clear) return { x, y };
+  }
+  return null;
+}
+function spotNear(w, x0, y0, r) {
+  for (let i = 0; i < 30; i++) {
+    const x = clamp(x0 + rand(-r, r), 60, w.W - 60);
+    const y = clamp(y0 + rand(-r, r), 220, w.H - 40);
+    if (!isWater(w.terrain, x, y)) return { x, y };
+  }
+  return null;
+}
+
+// Loaded worlds need their terrain helpers back.
+export function revive(w) {
+  reviveTerrain(w.terrain);
   return w;
 }
 
@@ -68,15 +205,7 @@ export function makePerson(w, x, y, extra = {}) {
     name: makeName(used),
     shape: pick(SHAPES),
     color: pick(FACES),
-    traits: {
-      kind: rand(),
-      aggr: rand(),
-      greed: rand(),
-      social: rand(),
-      faith: rand(),
-      brave: rand(),
-      work: rand(),
-    },
+    traits: randomTraits(),
     age: rand(ADULT, 34),
     life: rand(78, 100),
     health: 100,
@@ -111,6 +240,10 @@ export function makePerson(w, x, y, extra = {}) {
     mod: 0,
     stun: 0,
     carried: false,
+    religion: null,
+    prophet: false,
+    army: null,
+    role: null,
     born: w.t,
     ...extra,
   };
@@ -129,7 +262,7 @@ export const membersOf = (w, c) => w.people.filter((p) => p.alive && p.colony ==
 export const isAdult = (p) => p.age >= ADULT;
 export const nameOf = (w, id) => w.names[id] ?? "؟";
 const rel = (a, b) => a.rel[b.id] ?? 0;
-function addRel(a, b, d) {
+export function addRel(a, b, d) {
   if (a === b) return;
   a.rel[b.id] = clamp(rel(a, b) + d, -100, 100);
 }
@@ -177,10 +310,17 @@ export function remember(w, p, text) {
   p.memories.push({ day: w.day, text });
   if (p.memories.length > 16) p.memories.shift();
 }
-function speak(w, p, text, dur = 2.6) {
+export function speak(w, p, text, dur = 2.6) {
   if (text) p.speech = { text, until: w.t + dur };
 }
-const fx = (w, type, x, y, dur, extra = {}) => w.effects.push({ type, x, y, t0: w.t, dur, ...extra });
+export const fx = (w, type, x, y, dur, extra = {}) => w.effects.push({ type, x, y, t0: w.t, dur, ...extra });
+
+// Big news: shown across the screen, and kept in the log.
+export function announce(w, text, at = null, kind = "news") {
+  log(w, text, at, kind);
+  w.announcements.push({ id: w.nextId++, text, t: w.t, kind, x: at?.x, y: at?.y });
+  if (w.announcements.length > 20) w.announcements.shift();
+}
 
 // ---------------------------------------------------------------- the clock
 
@@ -204,6 +344,8 @@ function step1(w, dt) {
   separate(w);
   w.people = w.people.filter((p) => p.alive || w.t - p.diedAt < 20);
   pendingTick(w);
+  weatherTick(w, dt);
+  faithTick(w, dt);
   housesTick(w, dt);
   treesTick(w, dt);
   coinsTick(w, dt);
@@ -241,11 +383,16 @@ function personTick(w, p, dt) {
 
   // Needs.
   const sleeping = p.task?.type === "sleep" && p.task.asleep;
-  p.food = Math.max(0, p.food - dt * (isAdult(p) ? 1.3 : 1));
+  p.food = Math.max(0, p.food - dt * (isAdult(p) ? 1.3 : 1) * (p.army ? 0.5 : 1)); // an army carries rations
   p.energy = sleeping ? Math.min(100, p.energy + dt * 9) : Math.max(0, p.energy - dt * 0.9);
   p.social = Math.max(0, p.social - dt * 1.1);
   p.mod *= Math.pow(0.5, dt / (DAY * 1.5)); // good and bad days fade over a day or two
   if (p.food <= 0) hurt(w, p, dt * 1.6, "گرسنگی");
+  // Winter is hard on the homeless.
+  if (w.season === "winter" && !p.home && !p.army) {
+    hurt(w, p, dt * 0.12, "سرما");
+    p.mod -= dt * 0.1;
+  }
   if (p.sick) {
     hurt(w, p, dt * 1.1, "طاعون");
     if (chance(dt * 0.25)) {
@@ -272,7 +419,7 @@ function personTick(w, p, dt) {
   move(w, p, dt);
 }
 
-function hurt(w, p, amount, cause, by = null) {
+export function hurt(w, p, amount, cause, by = null) {
   if (!p.alive) return;
   p.health -= amount;
   if (p.health <= 0) die(w, p, cause, by);
@@ -301,6 +448,11 @@ function die(w, p, cause, by = null) {
     }
     if (q.spouse === p.id) q.spouse = null;
   }
+  if (p.prophet) {
+    const r = religionOf(w, p.religion);
+    if (r) announce(w, `🕯️ ${p.name}، پیامبر «${r.name}»، درگذشت.`, p, "faith");
+  }
+  if (killer && infidel(p, killer)) grieve(w, p.religion, killer.religion, 8);
   if (killer) {
     remember(w, killer, `${p.name} را کشتم.`);
     addColRel(w, p.colony, killer.colony, -25);
@@ -348,6 +500,12 @@ function decide(w, p) {
   const others = w.people.filter((q) => q.alive && q !== p && !q.carried && q.z <= 0);
   const near = others.filter((q) => dist(p, q) < 520);
 
+  // Soldiers follow their army.
+  if (p.army) {
+    const task = soldierTask(w, p);
+    if (task) return task;
+  }
+
   // A plan from the AI mind, if one is waiting.
   if (p.plan && !p.plan.used && w.t < p.plan.until) {
     p.plan.used = true;
@@ -371,13 +529,15 @@ function decide(w, p) {
   // Body.
   if (p.food < 60) {
     const tree = nearest(w.trees, p, (t) => t.fruit > 0 && !t.dead && !t.burn);
-    if (tree) add(((60 - p.food) / 60) * 1.8 + (p.food < 20 ? 1 : 0), () => ({ type: "gather", tree: tree.id, until: until(40) }));
+    if (tree) add(((60 - p.food) / 60) * 1.8 + (p.food < 20 ? 1 : 0) + (p.food < 10 ? 2 : 0), () => ({ type: "gather", tree: tree.id, until: until(40) }));
     else if (p.food < 25 && chance(0.3)) speak(w, p, say("hungry"));
+    const spot = fishingSpot(w, p);
+    if (spot) add(((60 - p.food) / 60) * (tree ? 0.9 : 1.6) + (w.season === "winter" ? 0.4 : 0), () => ({ type: "fish", x: spot.x, y: spot.y, until: until(40) }));
   }
   if (p.energy < 35)
     add(((35 - p.energy) / 35) * 1.6 + 0.2, () => {
       const home = p.home && houseOf(w, p.home);
-      return home && home.built >= 1 && !home.ruined
+      return home && home.built >= 1 && !home.ruined && Math.hypot(home.x - p.x, home.y - p.y) < 700
         ? { type: "sleep", x: home.x + rand(-14, 14), y: home.y + 16, until: until(60) }
         : { type: "sleep", x: p.x, y: p.y, until: until(60) };
     });
@@ -401,10 +561,15 @@ function decide(w, p) {
   if (rock) add(0.35 + T.work * 0.5 + T.greed * 0.3 - p.wealth / 80, () => ({ type: "work", rock: rock.id, until: until(30) }));
   const home = p.home && houseOf(w, p.home);
   if (!home || home.ruined) {
-    const empty = nearest(w.houses, p, (h) => h.built >= 1 && !h.ruined && h.owner === null, 900);
+    const empty = nearest(w.houses, p, (h) => h.kind === "house" && h.built >= 1 && !h.ruined && h.owner === null, 900);
     if (empty) add(1.1, () => ({ type: "claim", house: empty.id, until: until(40) }));
     else if (p.wealth >= HOUSE_COST) add(1.2, () => buildTask(w, p));
   } else if (home.built < 1) add(1.3, () => ({ type: "build", house: home.id, until: until(40) }));
+  else if (home.owner === p.id && home.kind === "house" && home.level < 2 && p.wealth > 45)
+    add(0.9, () => ({ type: "upgrade", house: home.id, until: until(40) }));
+  // The tribe's temple or castle going up.
+  const works = p.colony && nearest(w.houses, p, (b) => b.colony === p.colony && b.kind !== "house" && b.built < 1 && !b.ruined, 900);
+  if (works) add(0.5 + T.work * 0.4 + (works.kind === "temple" ? T.faith * 0.4 : 0), () => ({ type: "build", house: works.id, until: until(40) }));
 
   // People.
   const lonely = (100 - p.social) / 100;
@@ -438,9 +603,21 @@ function decide(w, p) {
     const raid = nearest(w.houses, p, (h) => h.colony && colStatus(col, colonyOf(w, h.colony)) === "war" && !h.ruined && h.built >= 1, 1400);
     if (raid) add(0.25 + T.aggr * 0.7, () => ({ type: "raid", house: raid.id, until: until(30) }));
   }
-  // Pray when life is hard (or just devout).
+  // Pray when life is hard (or just devout) — at the temple if there is one.
   const mood = happiness(w, p);
-  if (T.faith > 0.35) add((mood < -20 ? 0.7 : 0.08) * T.faith * 1.6, () => ({ type: "pray", until: until(5) }));
+  if (T.faith > 0.35)
+    add((mood < -20 ? 0.7 : 0.1) * T.faith * 1.6, () => {
+      const temple = p.religion && nearest(w.houses, p, (b) => b.kind === "temple" && b.built >= 1 && !b.ruined && b.religion === p.religion, 700);
+      return temple ? { type: "pray", x: temple.x + rand(-50, 50), y: temple.y + rand(20, 45), until: until(20) } : { type: "pray", until: until(5) };
+    });
+  // Spread the word.
+  if (p.religion && T.faith > 0.6) {
+    const soul = nearest(near, p, (q) => isAdult(q) && q.religion !== p.religion && (q.rel[p.id] ?? 0) > -25 && !q.army, 420);
+    if (soul) add((T.faith - 0.5) * (p.prophet ? 2.2 : 1) * (0.5 + T.social), () => ({ type: "preach", target: soul.id, until: until(15) }));
+  }
+  // The pilgrimage.
+  if (p.religion && T.faith > 0.65 && Math.hypot(p.x - w.holy.x, p.y - w.holy.y) > 500)
+    add(0.12 * T.faith, () => ({ type: "pilgrim", x: w.holy.x + rand(-90, 90), y: w.holy.y + rand(-30, 50), until: until(DAY * 1.2) }));
 
   add(0.22, () => wanderTask(w, p, 300));
   return best(opts) ?? wanderTask(w, p, 200);
@@ -469,6 +646,22 @@ function pickSocial(p, near) {
   return bestQ;
 }
 
+// The nearest bank of the river (on this side) or of a lake.
+function fishingSpot(w, p) {
+  const t = w.terrain;
+  const rx = t.riverX(p.y);
+  const half = t.width(p.y) / 2 + 14;
+  let best = { x: p.x < rx ? rx - half : rx + half, y: p.y };
+  let bd = Math.abs(best.x - p.x);
+  for (const l of t.lakes) {
+    const a = Math.atan2((p.y - l.y) / l.ry, (p.x - l.x) / l.rx);
+    const e = { x: l.x + Math.cos(a) * (l.rx + 14), y: l.y + Math.sin(a) * (l.ry + 10) };
+    const d = Math.hypot(e.x - p.x, e.y - p.y);
+    if (d < bd) (best = e), (bd = d);
+  }
+  return bd < 1800 ? best : null;
+}
+
 function wanderTask(w, p, r) {
   const home = p.home && houseOf(w, p.home);
   const cx = home && !home.ruined && chance(0.6) ? home.x : p.x;
@@ -480,20 +673,10 @@ function buildTask(w, p) {
   // Near the spouse, the tribe, or just here.
   const col = p.colony && colonyOf(w, p.colony);
   const anchor = col ? colonyCenter(w, col) : p;
-  let spot = null;
-  for (let i = 0; i < 20 && !spot; i++) {
-    const x = clamp(anchor.x + rand(-260, 260), 80, w.W - 80);
-    const y = clamp(anchor.y + rand(-160, 160), 140, w.H - 60);
-    const clear =
-      w.houses.every((h) => Math.hypot(h.x - x, (h.y - y) * 1.6) > 110) &&
-      w.trees.every((t) => Math.hypot(t.x - x, (t.y - y) * 1.6) > 50) &&
-      w.rocks.every((r) => Math.hypot(r.x - x, (r.y - y) * 1.6) > 70);
-    if (clear) spot = { x, y };
-  }
+  const spot = findSpot(w, anchor.x, anchor.y, 280) ?? findSpot(w, p.x, p.y, 400);
   if (!spot) return wanderTask(w, p, 300);
   p.wealth -= HOUSE_COST;
-  const house = { id: w.nextId++, x: spot.x, y: spot.y, owner: p.id, colony: p.colony, built: 0, hp: 100, fire: 0, ruined: false };
-  w.houses.push(house);
+  const house = newBuilding(w, "house", spot, p);
   p.home = house.id;
   const spouse = p.spouse && byId(w, p.spouse);
   if (spouse && !spouse.home) spouse.home = house.id;
@@ -525,6 +708,85 @@ function runTask(w, p, dt) {
       if (arrived(p)) k.idle = (k.idle ?? rand(1, 3)) - dt;
       if (k.idle < 0) done(p);
       return;
+    case "fish":
+      goTo(p, k.x, k.y);
+      if (arrived(p, 18)) {
+        k.working = true;
+        k.fishing = true;
+        p.facing = w.terrain.riverX(p.y) > p.x ? 1 : -1;
+        k.left = (k.left ?? rand(4, 7)) - dt;
+        if (k.left < 0) {
+          if (chance(0.75)) {
+            p.food = Math.min(100, p.food + 40);
+            fx(w, "pop", p.x, p.y - 70, 0.8, { text: "🐟" });
+          }
+          done(p);
+        }
+      }
+      return;
+    case "march":
+      goTo(p, k.x, k.y);
+      k.running = Math.hypot(k.x - p.x, k.y - p.y) > 60;
+      return;
+    case "shoot": {
+      const q = byId(w, k.target);
+      if (!q?.alive || q.carried) return done(p);
+      const d = dist(p, q);
+      if (d > 260) goTo(p, q.x + (p.x < q.x ? -200 : 200), q.y);
+      else if (d < 110) goTo(p, p.x + (p.x - q.x) * 0.8, p.y + (p.y - q.y) * 0.4);
+      else {
+        goTo(p, p.x, p.y);
+        p.facing = q.x > p.x ? 1 : -1;
+        k.aim = (k.aim ?? rand(0.6, 1.2)) - dt;
+        k.working = true;
+        if (k.aim < 0) {
+          shoot(w, p, q);
+          k.aim = rand(1.1, 1.6);
+        }
+      }
+      return;
+    }
+    case "pilgrim":
+      goTo(p, k.x, k.y);
+      if (arrived(p, 30)) {
+        k.kneel = true;
+        k.idle = (k.idle ?? 6) - dt;
+        if (!k.said) {
+          k.said = true;
+          const r = religionOf(w, p.religion);
+          speak(w, p, `${r?.symbol ?? "🙏"} ای ${r?.god ?? "خدا"}…`, 4);
+          p.traits.faith = Math.min(1, p.traits.faith + 0.04);
+          p.mod += 12;
+          remember(w, p, `به زیارت ${w.holy.name} رفتم.`);
+          // Strangers of another faith in the holy city: trouble.
+          const other = nearest(alive(w), p, (q) => infidel(p, q) && isAdult(q), 160);
+          if (other && chance(0.4)) {
+            grieve(w, p.religion, other.religion, 5);
+            addBoth(p, other, -15);
+            speak(w, other, "این‌جا جای تو نیست!", 3);
+          }
+        }
+        if (k.idle < 0) done(p);
+      }
+      return;
+    case "upgrade": {
+      const h = houseOf(w, k.house);
+      if (!h || h.ruined || h.level >= 2 || p.wealth < 25) return done(p);
+      goTo(p, h.x + 34, h.y + 10);
+      if (arrived(p)) {
+        k.working = true;
+        k.left = (k.left ?? 7) - dt;
+        if (k.left < 0) {
+          p.wealth -= 25;
+          h.level = 2;
+          h.hp = h.maxHp = 160;
+          remember(w, p, "خانه‌ام را سنگی کردم.");
+          log(w, `🧱 ${p.name} خانه‌اش را سنگی کرد.`, h, "build");
+          done(p);
+        }
+      }
+      return;
+    }
     case "listen": {
       const q = byId(w, k.target);
       if (!q?.alive) return done(p);
@@ -591,14 +853,23 @@ function runTask(w, p, dt) {
     case "build": {
       const h = houseOf(w, k.house);
       if (!h || h.ruined) return done(p);
-      goTo(p, h.x + 34, h.y + 10);
+      if (k.side == null) k.side = rand(-1, 1);
+      const span = h.kind === "house" ? 44 : 80;
+      goTo(p, h.x + k.side * span, h.y + 12);
       if (arrived(p)) {
         k.working = true;
-        h.built = Math.min(1, h.built + dt / 9);
+        const was = h.built;
+        h.built = Math.min(1, h.built + dt / (h.kind === "house" ? 9 : 60));
+        if (was >= 1) return done(p);
         if (chance(dt * 0.15)) speak(w, p, say("build"));
         if (h.built >= 1) {
-          log(w, `🏠 ${p.name} خانه ساخت.`, h, "build");
-          remember(w, p, "خانه‌ی خودم را ساختم.");
+          const c = colonyOf(w, h.colony);
+          if (h.kind === "temple") announce(w, `⛪ معبد «${c?.name ?? ""}» ساخته شد.`, h, "build");
+          else if (h.kind === "keep") announce(w, `🏰 قلعه‌ی «${c?.name ?? ""}» سر به آسمان کشید.`, h, "build");
+          else {
+            log(w, `🏠 ${p.name} خانه ساخت.`, h, "build");
+            remember(w, p, "خانه‌ی خودم را ساختم.");
+          }
           p.mod += 20;
           done(p);
         }
@@ -625,6 +896,12 @@ function runTask(w, p, dt) {
       return;
     }
     case "pray":
+      if (k.x != null && !arrived(p, 20)) {
+        goTo(p, k.x, k.y);
+        return;
+      }
+      if (k.x != null && k.idle == null) k.idle = 5;
+      if (k.idle != null && (k.idle -= dt) < 0) return done(p);
       goTo(p, p.x, p.y);
       k.kneel = true;
       if (!k.said) {
@@ -714,6 +991,10 @@ function meet(w, p, dt) {
     if (k.type === "court") speak(w, p, say("propose", q), 3);
     if (k.type === "steal") speak(w, p, say("steal"), 1.5);
     if (k.type === "gift") speak(w, p, say("gift"));
+    if (k.type === "preach") {
+      const r = religionOf(w, p.religion);
+      speak(w, p, r ? `${r.symbol} ${pick([`${r.god} تنها راه است!`, `به «${r.name}» بپیوند`, `${r.god} تو را دوست دارد`])}` : "", 3);
+    }
   }
   if (k.clock < 2.6) return;
 
@@ -725,6 +1006,8 @@ function meet(w, p, dt) {
     let d = 12 * (alike - 0.3) + 8 * ((T.kind + U.kind) / 2 - 0.5) - 10 * ((T.aggr + U.aggr) / 2 - 0.5) + rand(-7, 7) + 1;
     if (p.colony && p.colony === q.colony) d += 4;
     if (atWar(w, p, q)) d -= 12;
+    if (infidel(p, q)) d -= 2 + (T.faith + U.faith) * 2;
+    else if (p.religion && p.religion === q.religion) d += 3;
     addBoth(p, q, d);
     p.social = Math.min(100, p.social + 40);
     q.social = Math.min(100, q.social + 40);
@@ -769,6 +1052,7 @@ function meet(w, p, dt) {
       return;
     }
   }
+  if (k.type === "preach") preachResult(w, p, q);
   if (k.type === "gift") {
     const give = Math.round(p.wealth * 0.25);
     p.wealth -= give;
@@ -788,7 +1072,8 @@ function fight(w, p, q, dt) {
   k.hit = (k.hit ?? 0) - dt;
   if (!k.said) {
     k.said = true;
-    speak(w, p, say(k.war ? "war" : "fight"), 1.6);
+    const faith = p.army && religionOf(w, p.religion);
+    speak(w, p, faith ? `${faith.symbol} ${pick([`برای ${faith.god}!`, "خدا با ماست!", "حمله!", `مرگ بر دشمنان ${faith.name.replace("آیین ", "")}!`])}` : say(k.war ? "war" : "fight"), 1.6);
     remember(w, q, `${p.name} به من حمله کرد!`);
     addRel(q, p, -30);
     addColRel(w, p.colony, q.colony, -6);
@@ -798,6 +1083,12 @@ function fight(w, p, q, dt) {
       const back = q.traits.brave * 0.8 + q.traits.aggr * 0.6 + (q.health > 50 ? 0.2 : -0.6) > 0.7;
       q.task = back ? { type: "fight", target: p.id, until: w.t + 8, started: true } : { type: "flee", from: p.id, until: w.t + 4 };
     }
+  }
+  // Let a beaten enemy run (the cruel chase them down).
+  if (q.task?.type === "flee" && q.health < 55 && p.traits.aggr < 0.78) {
+    if (chance(0.5)) speak(w, p, "فرار کن، ترسو!", 1.5);
+    done(p);
+    return;
   }
   if (k.hit <= 0) {
     k.hit = 0.8;
@@ -815,7 +1106,7 @@ function fight(w, p, q, dt) {
       return;
     }
     // Most people stop once the other is down; the cruel (and soldiers) don't.
-    if (q.health < 30 && p.traits.aggr < (k.war ? 0.55 : 0.8)) {
+    if (q.health < 30 && p.traits.aggr < (k.war ? 0.72 : 0.8)) {
       speak(w, p, k.war ? "برو، دیگه این طرفا نبینمت!" : "دیگه تمومه. برو!");
       remember(w, q, `${p.name} کتکم زد ولی ولم کرد.`);
       q.task = { type: "flee", from: p.id, until: w.t + 6 };
@@ -857,6 +1148,9 @@ function move(w, p, dt) {
   const d = Math.hypot(dx, dy);
   let sp = SPEED * (isAdult(p) ? 1 : 0.85) * (p.energy < 15 ? 0.6 : 1) * (k?.running || k?.type === "fight" ? 1.5 : 1);
   if (p.sick) sp *= 0.7;
+  p.wet = isWater(w.terrain, p.x, p.y);
+  if (p.wet) sp *= 0.45;
+  if (w.weather.type === "snow") sp *= 0.8;
   if (still || d < 2) {
     p.vx *= 0.7;
     p.vy *= 0.7;
@@ -875,7 +1169,7 @@ function move(w, p, dt) {
 
 function keepIn(w, p) {
   p.x = clamp(p.x, 30, w.W - 30);
-  p.y = clamp(p.y, 90, w.H - 20);
+  p.y = clamp(p.y, 200, w.H - 20);
 }
 
 // Keep a little personal space.
@@ -911,7 +1205,7 @@ function dayTick(w) {
         t.dead = false;
         t.fruit = 0;
       }
-    } else t.fruit = Math.min(4, t.fruit + randInt(1, 3));
+    } else t.fruit = Math.min(4, t.fruit + { spring: randInt(1, 2), summer: randInt(1, 3), autumn: randInt(2, 3), winter: randInt(0, 1) }[w.season]);
   }
   // Rubble is cleared after a few days.
   w.houses = w.houses.filter((h) => !h.ruined || w.day - h.ruinedAt < 4);
@@ -924,9 +1218,16 @@ function dayTick(w) {
     // Children grow up and leave the nest (a little).
     if (Math.abs(p.age - ADULT) < 1 && p.parents.length) remember(w, p, "بزرگ شدم!");
   }
+  const season = seasonOf(w.day);
+  if (season.id !== w.season) {
+    w.season = season.id;
+    if (w.day > 0) announce(w, `${season.icon} ${season.name} از راه رسید.`, null, "season");
+  }
   births(w);
+  immigrants(w);
   tribes(w);
   politics(w);
+  faithDay(w);
 }
 
 function births(w) {
@@ -950,6 +1251,7 @@ function births(w) {
       parents: [a.id, b.id],
       home: home.id,
       colony: a.colony ?? b.colony,
+      religion: a.religion ?? b.religion,
     });
     a.kids.push(kid.id);
     b.kids.push(kid.id);
@@ -964,6 +1266,21 @@ function births(w) {
     remember(w, a, `بچه‌مان ${kid.name} به دنیا آمد.`);
     remember(w, b, `بچه‌مان ${kid.name} به دنیا آمد.`);
   }
+}
+
+// When the land empties, newcomers wander in from the edges.
+function immigrants(w) {
+  const n = alive(w).length;
+  if (n >= 30 || !chance(0.6)) return;
+  const west = chance(0.5);
+  const x = west ? 90 : w.W - 90;
+  const y = rand(300, w.H - 200);
+  const k = randInt(2, 4);
+  for (let i = 0; i < k; i++) {
+    const p = makePerson(w, x + rand(-40, 40), y + rand(-40, 40), { age: rand(ADULT, 30), wealth: randInt(5, 20) });
+    remember(w, p, "از سرزمینی دور به این‌جا کوچ کردم.");
+  }
+  log(w, `🧳 ${k} مهاجر از ${west ? "غرب" : "شرق"} از راه رسیدند.`, { x, y }, "colony");
 }
 
 // People band together into tribes: with their spouse, with their friends.
@@ -992,7 +1309,7 @@ function tribes(w) {
   }
 }
 
-export function foundColony(w, p, with_ = []) {
+export function foundColony(w, p, with_ = [], quiet = false) {
   if (p.colony) leaveColony(w, p, "");
   const used = new Set(w.colonies.map((c) => c.name));
   const taken = new Set(w.colonies.map((c) => c.color));
@@ -1008,10 +1325,11 @@ export function foundColony(w, p, with_ = []) {
     founded: w.day,
   };
   w.colonies.push(c);
-  log(w, `🚩 ${p.name} «${c.name}» را بنیان گذاشت.`, p, "colony");
+  if (!quiet) log(w, `🚩 ${p.name} «${c.name}» را بنیان گذاشت.`, p, "colony");
   remember(w, p, `«${c.name}» را بنیان گذاشتم و رهبرش شدم.`);
   joinColony(w, p, c, true);
-  for (const q of with_) if (!q.colony) joinColony(w, q, c);
+  for (const q of with_) if (!q.colony) joinColony(w, q, c, quiet);
+  c.religion = p.religion;
   for (const o of w.colonies) if (o !== c) c.rel[o.id] = o.rel[c.id] = rand(-15, 10);
   return c;
 }
@@ -1127,7 +1445,7 @@ export function setStatus(w, a, b, status, text) {
     a.status[b.id] = b.status[a.id] = "war";
     w.stats.wars++;
     a.rel[b.id] = b.rel[a.id] = Math.min(colRel(a, b), -50);
-    log(w, text ?? `⚔️ «${a.name}» به «${b.name}» اعلان جنگ کرد!`, la, "war");
+    if (text !== " ") log(w, text ?? `⚔️ «${a.name}» به «${b.name}» اعلان جنگ کرد!`, la, "war");
     for (const p of [...membersOf(w, a), ...membersOf(w, b)]) remember(w, p, `«${a.name}» و «${b.name}» وارد جنگ شدند.`);
   } else if (status === "peace") {
     a.status[b.id] = b.status[a.id] = null;
@@ -1169,7 +1487,11 @@ function ruin(w, h, cause) {
   h.ruinedAt = w.day;
   fx(w, "dust", h.x, h.y, 1.2, { big: true });
   const owner = byId(w, h.owner);
-  log(w, `🏚️ خانه‌ی ${owner?.name ?? "خالی"} ویران شد (${cause}).`, h, "ruin");
+  if (h.kind === "temple" || h.kind === "keep") {
+    const c = colonyOf(w, h.colony);
+    announce(w, `🔥 ${h.kind === "temple" ? "معبد" : "قلعه"}ِ «${c?.name ?? "؟"}» ویران شد (${cause})!`, h, "ruin");
+    if (h.religion) for (const r of w.religions) if (r.id !== h.religion) grieve(w, h.religion, r.id, h.kind === "temple" ? 25 : 10);
+  } else log(w, `🏚️ خانه‌ی ${owner?.name ?? "خالی"} ویران شد (${cause}).`, h, "ruin");
   for (const p of alive(w))
     if (p.home === h.id) {
       p.home = null;
@@ -1210,6 +1532,7 @@ function coinsTick(w, dt) {
 export const INTENTS = [
   "chat", "court", "fight", "steal", "gift", "pray", "work", "build", "rest", "eat", "wander", "flee",
   "found_colony", "join_colony", "leave_colony", "ally", "declare_war", "make_peace",
+  "preach", "pilgrimage", "holy_war",
 ];
 
 const findByName = (w, p, name) =>
@@ -1231,6 +1554,21 @@ function planTask(w, p, plan) {
       return target ? { type: plan.intent, target: target.id, until, war: atWar(w, p, target) } : null;
     case "flee":
       return target ? { type: "flee", from: target.id, until: w.t + 5 } : null;
+    case "preach":
+      return target && p.religion ? { type: "preach", target: target.id, until } : null;
+    case "pilgrimage":
+      return { type: "pilgrim", x: w.holy.x + rand(-80, 80), y: w.holy.y + rand(-20, 40), until: w.t + DAY };
+    case "holy_war": {
+      const mine = religionOf(w, p.religion);
+      const leads = mine && (p.prophet || (own && own.leader === p.id));
+      if (!leads || w.armies.some((a) => a.religion === mine.id && a.kind === "crusade")) return null;
+      const enemy =
+        w.religions.find((r) => r !== mine && plan.target && (plan.target.includes(r.name.replace("آیین ", "")) || r.name.includes(plan.target))) ??
+        (target && religionOf(w, target.religion) !== mine ? religionOf(w, target.religion) : null) ??
+        religionOf(w, w.holy.owner !== mine.id ? w.holy.owner : null);
+      declareHolyWar(w, mine, enemy, p);
+      return null;
+    }
     case "pray":
       return { type: "pray", until: w.t + 5 };
     case "work": {
@@ -1302,13 +1640,48 @@ export const POWERS = [
   { id: "plague", icon: "🦠", name: "طاعون" },
   { id: "gold", icon: "💰", name: "باران طلا" },
   { id: "bless", icon: "✨", name: "برکت", hint: "شفا، شادی و ایمان" },
+  { id: "miracle", icon: "🕊️", name: "معجزه", hint: "بی‌دین‌ها به آیینِ آن‌جا می‌گروند" },
+  { id: "discord", icon: "😈", name: "فتنه", hint: "کینه میان قوم‌ها و آیین‌ها" },
   { id: "rain", icon: "🌧️", name: "باران", hint: "آتش را خاموش می‌کند و میوه می‌دهد" },
   { id: "tree", icon: "🌳", name: "درخت" },
   { id: "create", icon: "🧍", name: "آفرینش" },
 ];
 
+function lightning(w, x, y) {
+  fx(w, "bolt", x, y, 0.5);
+  fx(w, "flash", x, y, 0.25);
+  fx(w, "scorch", x, y, DAY);
+  for (const p of alive(w)) {
+    const d = Math.hypot(p.x - x, (p.y - y) * 1.4);
+    if (d < 50) hurt(w, p, 85 * (1 - d / 70), "صاعقه");
+  }
+  for (const h of w.houses) if (!h.ruined && Math.hypot(h.x - x, h.y - y) < 70) h.fire = Math.max(h.fire, 0.5);
+  for (const t of w.trees) if (!t.dead && Math.hypot(t.x - x, t.y - y) < 60) t.burn = t.burn || 0.01;
+}
+
+// Weather comes and goes; storms throw their own lightning.
+function weatherTick(w, dt) {
+  const k = w.weather;
+  if (w.t > k.until) {
+    const next = rollWeather(seasonOf(w.day));
+    if (next !== k.type && (next === "storm" || next === "snow" || k.type === "storm"))
+      log(w, `${WEATHERS[next].icon} هوا: ${WEATHERS[next].name}`, null, "season");
+    w.weather = { type: next, until: w.t + DAY * rand(0.35, 0.9) };
+  }
+  if (k.type === "rain" || k.type === "storm" || k.type === "snow")
+    for (const h of w.houses) if (h.fire > 0) h.fire = Math.max(0, h.fire - dt * 0.03);
+  if (k.type === "storm" && chance(dt * 0.035)) {
+    const x = rand(100, w.W - 100);
+    const y = rand(200, w.H - 60);
+    lightning(w, x, y);
+    scare(w, x, y, 180);
+    witness(w, x, y, 300, "صاعقه‌ی طوفان کنارم زد!", true);
+  }
+}
+
 // Everyone who saw it reacts: the devout pray, the doubters curse.
 function witness(w, x, y, r, text, bad) {
+  godSeen(w, x, y, r, bad);
   for (const p of alive(w)) {
     const d = Math.hypot(p.x - x, p.y - y);
     if (d > r) continue;
@@ -1340,21 +1713,12 @@ function scare(w, x, y, r) {
 export function power(w, id, x, y) {
   const at = { x, y };
   switch (id) {
-    case "lightning": {
-      fx(w, "bolt", x, y, 0.5);
-      fx(w, "flash", x, y, 0.25);
-      fx(w, "scorch", x, y, DAY);
-      for (const p of alive(w)) {
-        const d = Math.hypot(p.x - x, (p.y - y) * 1.4);
-        if (d < 50) hurt(w, p, 85 * (1 - d / 70), "صاعقه");
-      }
-      for (const h of w.houses) if (!h.ruined && Math.hypot(h.x - x, h.y - y) < 70) h.fire = Math.max(h.fire, 0.5);
-      for (const t of w.trees) if (!t.dead && Math.hypot(t.x - x, t.y - y) < 60) t.burn = t.burn || 0.01;
+    case "lightning":
+      lightning(w, x, y);
       scare(w, x, y, 220);
       witness(w, x, y, 380, "خدا نزدیک من صاعقه زد!", true);
       log(w, "⚡ خدا صاعقه زد.", at, "god");
       return;
-    }
     case "fire":
       fx(w, "spark", x, y, 0.6);
       for (const h of w.houses) if (!h.ruined && Math.hypot(h.x - x, (h.y - y) * 1.4) < 60) h.fire = Math.max(h.fire, 0.4);
@@ -1419,6 +1783,37 @@ export function power(w, id, x, y) {
       log(w, "✨ خدا برکت داد.", at, "god");
       return;
     }
+    case "miracle": {
+      fx(w, "beam", x, y, 3);
+      fx(w, "bless", x, y, 2);
+      for (const p of alive(w))
+        if (Math.hypot(p.x - x, p.y - y) < 260) {
+          p.traits.faith = Math.min(1, p.traits.faith + 0.15);
+          p.mod += 20;
+          if (chance(0.4)) speak(w, p, "معجزه! 😇", 3);
+        }
+      witness(w, x, y, 420, "با چشم خودم معجزه دیدم: نوری از آسمان!", false);
+      announce(w, "🕊️ نوری از آسمان تابید؛ مردم از معجزه سخن می‌گویند.", at, "god");
+      return;
+    }
+    case "discord": {
+      fx(w, "discord", x, y, 2.5);
+      const near = alive(w).filter((p) => Math.hypot(p.x - x, p.y - y) < 320 && isAdult(p));
+      for (const p of near)
+        for (const q of alive(w))
+          if (p !== q && (infidel(p, q) || (p.colony && q.colony && p.colony !== q.colony))) {
+            addRel(p, q, -rand(15, 35));
+            if (p.colony && q.colony) addColRel(w, p.colony, q.colony, -2);
+          }
+      for (const r of w.religions)
+        if (near.some((p) => p.religion === r.id)) for (const o of w.religions) if (o !== r) grieve(w, r.id, o.id, 20);
+      for (const p of near) {
+        remember(w, p, "یک‌دفعه از همه‌ی غریبه‌ها متنفر شدم…");
+        if (chance(0.3)) speak(w, p, pick(["همه‌ش تقصیر اوناست!", "کافرها!", "دیگه تحمل ندارم!"]), 3);
+      }
+      log(w, "😈 خدا در دل مردم کینه کاشت.", at, "god");
+      return;
+    }
     case "rain":
       fx(w, "rain", x, y, 3);
       for (const h of w.houses) if (Math.hypot(h.x - x, h.y - y) < 260) h.fire = 0;
@@ -1430,6 +1825,7 @@ export function power(w, id, x, y) {
       log(w, "🌧️ خدا باران فرستاد.", at, "god");
       return;
     case "tree":
+      if (isWater(w.terrain, x, y)) return;
       addTree(w, x, y, 2);
       fx(w, "bless", x, y, 0.8);
       return;

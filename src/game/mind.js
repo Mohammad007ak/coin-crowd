@@ -4,6 +4,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { INTENTS, byId, colRel, colStatus, colonyOf, happiness, houseOf, isAdult, nameOf } from "./world.js";
 import { SHAPE_NAMES, fa } from "./util.js";
+import { followersOf, religionOf } from "./crusade.js";
 import { moodWord } from "./world.js";
 
 export const MODELS = [
@@ -23,6 +24,7 @@ Rules:
 - "intent" must be one of the listed actions. "target" is the exact name of a person (or tribe name for tribe actions) the action is aimed at, or "" if none.
 - "feelings" lists how this moment changed feelings toward specific people by name (change from -30 to 30); may be empty.
 - Tribe actions (ally, declare_war, make_peace) only work if this villager is a tribe leader; found_colony, join_colony and leave_colony are about their own membership.
+- Faith matters deeply here. Religions compete for the holy city on the sacred hill; "preach" tries to convert the target person, "pilgrimage" walks to the holy city, and "holy_war" (only for a prophet or a tribe leader) calls a crusade — target the rival religion's name, or leave it empty to march on the holy city.
 - If God speaks to them, answer God directly in "say" — with awe, fear, anger, gratitude or defiance as fits their faith and history.`;
 
 const SCHEMA = {
@@ -61,6 +63,18 @@ export function describe(w, p) {
   lines.push(
     `State: health ${Math.round(p.health)}/100, hunger satisfied ${Math.round(p.food)}/100, energy ${Math.round(p.energy)}/100, loneliness ${Math.round(100 - p.social)}/100, coins ${p.wealth}, mood: ${moodWord(happiness(w, p))}${p.sick ? ", SICK with plague" : ""}.`,
   );
+  const faith = religionOf(w, p.religion);
+  lines.push(
+    faith
+      ? `Faith: ${faith.name} (worships ${faith.god}; ${followersOf(w, faith).length} followers)${p.prophet ? ". I AM ITS PROPHET." : ""}${p.army ? ` I am a ${p.role} in the army "${w.armies.find((a) => a.id === p.army)?.name}".` : ""}`
+      : "Faith: none yet.",
+  );
+  const holyOwner = religionOf(w, w.holy.owner);
+  lines.push(
+    `The holy city is held by ${holyOwner ? holyOwner.name : "nobody"}. Religions: ${w.religions
+      .map((r) => `${r.name} (${followersOf(w, r).length})${faith && r !== faith ? `, our grievance against them ${Math.round(faith.grief[r.id] ?? 0)}` : ""}`)
+      .join("; ")}. Active holy wars: ${w.armies.filter((a) => a.kind === "crusade").map((a) => `${a.name} by ${religionOf(w, a.religion)?.name} (${a.state})`).join("; ") || "none"}. Season: ${w.season}, weather: ${w.weather.type}.`,
+  );
   lines.push(`Home: ${home ? (home.ruined ? "ruined" : home.built < 1 ? "under construction" : "has a house") : "homeless"} (a house costs 20 coins).`);
   lines.push(`Spouse: ${p.spouse ? nameOf(w, p.spouse) : "none"}. Children: ${p.kids.map((id) => nameOf(w, id)).join(", ") || "none"}. Parents: ${p.parents.map((id) => nameOf(w, id)).join(", ") || "unknown"}.`);
   if (col) {
@@ -78,7 +92,7 @@ export function describe(w, p) {
   lines.push("People nearby (name, my feeling toward them from -100 to 100, their tribe, what they're doing):");
   for (const q of near)
     lines.push(
-      `- ${q.name}: ${Math.round(p.rel[q.id] ?? 0)}, ${q.colony ? colonyOf(w, q.colony)?.name : "no tribe"}, ${isAdult(q) ? "" : "child, "}${q.spouse ? `married to ${nameOf(w, q.spouse)}, ` : "single, "}${q.wealth} coins, ${q.task?.type ?? "idle"}`,
+      `- ${q.name}: ${Math.round(p.rel[q.id] ?? 0)}, ${q.colony ? colonyOf(w, q.colony)?.name : "no tribe"}, ${religionOf(w, q.religion)?.name ?? "no faith"}${q.prophet ? " (prophet)" : ""}, ${isAdult(q) ? "" : "child, "}${q.spouse ? `married to ${nameOf(w, q.spouse)}, ` : "single, "}${q.wealth} coins, ${q.task?.type ?? "idle"}`,
     );
   const strong = Object.entries(p.rel)
     .filter(([, v]) => Math.abs(v) > 40)

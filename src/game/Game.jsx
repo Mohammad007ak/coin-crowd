@@ -10,6 +10,7 @@ import {
   colonyCenter,
   colonyOf,
   createWorld,
+  revive,
   happiness,
   houseOf,
   isAdult,
@@ -24,6 +25,8 @@ import {
 import { hitPerson, moodOf, personHeight, render, renderMini, toWorld } from "./draw.js";
 import { MODELS, pickThinker, think } from "./mind.js";
 import { SHAPE_NAMES, clamp, fa, pick } from "./util.js";
+import { followersOf, religionOf, revelation } from "./crusade.js";
+import { WEATHERS, seasonOf } from "./terrain.js";
 import "./game.css";
 
 const SAVE_KEY = "cg:world";
@@ -62,7 +65,14 @@ const ACTIVITY = {
   extinguish: "آتش را خاموش می‌کند",
   raid: "به خانه‌ی دشمن حمله می‌کند",
   follow: "دنبال می‌کند",
+  fish: "ماهی می‌گیرد",
+  march: "با سپاه پیش می‌رود",
+  shoot: "تیر می‌اندازد به",
+  preach: "تبلیغ دین می‌کند برای",
+  pilgrim: "به زیارت شهر مقدس می‌رود",
+  upgrade: "خانه‌اش را سنگی می‌کند",
 };
+const ROLES = { commander: "🎖️ فرمانده", bearer: "🚩 پرچم‌دار", archer: "🏹 کماندار", soldier: "⚔️ سرباز" };
 const TRAITS = [
   ["kind", "مهربانی"],
   ["aggr", "پرخاشگری"],
@@ -82,8 +92,12 @@ export default function Game() {
   const canvasRef = useRef(null);
   const miniRef = useRef(null);
   const worldRef = useRef(null);
-  if (!worldRef.current) worldRef.current = load(SAVE_KEY, null)?.version === 1 ? load(SAVE_KEY, null) : createWorld();
-  const camRef = useRef({ x: 1600, y: 750, zoom: 1 });
+  if (!worldRef.current) {
+    const saved = load(SAVE_KEY, null);
+    worldRef.current = saved?.version === 2 ? revive(saved) : createWorld();
+  }
+  // Start looking at the western town.
+  const camRef = useRef({ x: worldRef.current.W * 0.3, y: worldRef.current.H * 0.45, zoom: 0.75 });
   if (import.meta.env.DEV) window.__game = { worldRef, camRef };
   const [, setFrame] = useState(0);
   const [tool, setTool] = useState("hand");
@@ -95,6 +109,9 @@ export default function Game() {
   const [ai, setAi] = useState({ busy: false, error: "", calls: 0, input: 0, output: 0 });
   const [whisper, setWhisper] = useState("");
   const [talking, setTalking] = useState(false);
+  // Big news, shown across the screen for a few seconds each.
+  const [news, setNews] = useState([]);
+  const seenNews = useRef(worldRef.current.announcements.at(-1)?.id ?? 0);
   const speedRef = useRef(speed);
   const toolRef = useRef(tool);
   const selectedRef = useRef(selected);
@@ -145,7 +162,17 @@ export default function Game() {
       raf = requestAnimationFrame(frame);
     };
     raf = requestAnimationFrame(frame);
-    const ui = setInterval(() => setFrame((n) => n + 1), 300);
+    const ui = setInterval(() => {
+      setFrame((n) => n + 1);
+      const w = worldRef.current;
+      const fresh = w.announcements.filter((a) => a.id > seenNews.current);
+      const now = Date.now();
+      if (fresh.length) seenNews.current = fresh.at(-1).id;
+      setNews((list) => {
+        const keep = list.filter((n) => now - n.at < 6000);
+        return fresh.length ? [...keep, ...fresh.map((a) => ({ ...a, at: now }))].slice(-3) : keep.length === list.length ? list : keep;
+      });
+    }, 300);
     const save = setInterval(() => store(SAVE_KEY, worldRef.current), 15000);
     const onHide = () => store(SAVE_KEY, worldRef.current);
     window.addEventListener("pagehide", onHide);
@@ -238,6 +265,8 @@ export default function Game() {
     if (!p?.alive || !text) return;
     setWhisper("");
     w.events.push({ id: w.nextId++, t: w.t, day: w.day, text: `☁️ خدا به ${p.name} گفت: «${text}»`, x: p.x, y: p.y, kind: "god" });
+    // The devout may take it as a calling.
+    revelation(w, p);
     if (settings.key) {
       setTalking(true);
       await runMind(p, text);
@@ -397,6 +426,7 @@ export default function Game() {
   const newWorld = () => {
     if (!confirm("دنیای فعلی نابود شود و یک دنیای تازه آفریده شود؟")) return;
     worldRef.current = createWorld();
+    seenNews.current = 0;
     lastThought.current = {};
     setSelected(null);
     store(SAVE_KEY, worldRef.current);
@@ -409,6 +439,7 @@ export default function Game() {
   const sel = selected && byId(w, selected);
   const toolInfo = POWERS.find((p) => p.id === tool);
   const hour = (w.t % DAY) / DAY;
+  const holyOwner = religionOf(w, w.holy.owner);
 
   return (
     <div className="game" dir="rtl">
@@ -429,10 +460,19 @@ export default function Game() {
           <strong>خدای سکه‌ها</strong>
         </div>
         <div className="stats">
-          <span title="روز">{hour > 0.72 ? "🌙" : "☀️"} روز {fa(w.day + 1)}</span>
+          <span title="روز">
+            {hour > 0.72 && hour < 0.96 ? "🌙" : "☀️"} روز {fa(w.day + 1)}
+          </span>
+          <span title={`${seasonOf(w.day).name}، هوا ${WEATHERS[w.weather.type].name}`}>
+            {seasonOf(w.day).icon}
+            {WEATHERS[w.weather.type].icon}
+          </span>
           <span title="جمعیت">👥 {fa(living.length)}</span>
-          <span title="قبیله‌ها">🚩 {fa(w.colonies.length)}</span>
-          <span title="مؤمنان">🙏 {fa(living.filter((p) => p.traits.faith > 0.5).length)}</span>
+          <span title="شهر مقدس" className="holy-chip" style={{ "--c": holyOwner?.color ?? "#999" }}>
+            🏛️ {holyOwner ? holyOwner.symbol : "—"}
+            {w.holy.contender && w.holy.progress > 0 && <i style={{ width: `${w.holy.progress * 100}%` }} />}
+          </span>
+          {w.armies.some((a) => a.kind === "crusade") && <span title="جنگ مقدس">⚔️</span>}
         </div>
         <div className="speed" role="group" aria-label="سرعت">
           {[
@@ -451,13 +491,21 @@ export default function Game() {
             📜 <span>رویدادها</span>
           </button>
           <button className={panel === "tribes" ? "on" : ""} onClick={() => setPanel(panel === "tribes" ? null : "tribes")}>
-            🚩 <span>قبیله‌ها</span>
+            🚩 <span>قبیله‌ها و آیین‌ها</span>
           </button>
           <button className={panel === "settings" ? "on" : ""} onClick={() => setPanel(panel === "settings" ? null : "settings")}>
             {settings.ai && settings.key ? "🧠" : "⚙️"} <span>هوش</span>
           </button>
         </div>
       </header>
+
+      <div className="news">
+        {news.map((n) => (
+          <button key={n.id} className={`news-item ${n.kind}`} onClick={() => goTo(n.x, n.y)}>
+            {n.text}
+          </button>
+        ))}
+      </div>
 
       <canvas ref={miniRef} className="mini" width={200} height={94} onClick={onMini} />
 
@@ -484,8 +532,44 @@ export default function Game() {
       {panel === "tribes" && (
         <aside className="panel side">
           <div className="panel-head">
-            <strong>قبیله‌ها</strong>
+            <strong>آیین‌ها</strong>
             <button onClick={() => setPanel(null)}>✕</button>
+          </div>
+          {w.religions.map((r) => {
+            const fol = followersOf(w, r);
+            const prophet = byId(w, r.prophet);
+            const war = w.armies.find((a) => a.religion === r.id && a.kind === "crusade");
+            const hates = Object.entries(r.grief)
+              .map(([id, g]) => [religionOf(w, Number(id)), g])
+              .filter(([o, g]) => o && g > 20)
+              .sort((a, b) => b[1] - a[1])[0];
+            return (
+              <div key={r.id} className="tribe faith" style={{ "--c": r.color }}>
+                <button className="tribe-name" onClick={() => prophet && (setSelected(prophet.id), goTo(prophet.x, prophet.y))}>
+                  {r.symbol} {r.name}
+                </button>
+                <small>
+                  👥 {fa(fol.length)} پیرو · 📿 {prophet?.alive ? prophet.name : "بی‌پیامبر"} · 🔥 شور {fa(r.zeal)}
+                  {w.holy.owner === r.id ? " · 🏛️ صاحب شهر مقدس" : ""}
+                </small>
+                {war && (
+                  <button className="war-line" onClick={() => goTo(war.x, war.y)}>
+                    ⚔️ {war.name}: {fa(war.members.length - war.losses)} سرباز ·{" "}
+                    {{ muster: "در حال جمع شدن", march: "در راه", siege: "در محاصره", return: "در بازگشت" }[war.state]}
+                  </button>
+                )}
+                {hates && (
+                  <div className="rels">
+                    <span className="rel war" style={{ "--c": hates[0].color }}>
+                      😠 کینه از {hates[0].symbol} {hates[0].name} ({fa(hates[1])})
+                    </span>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div className="panel-head" style={{ marginTop: 14 }}>
+            <strong>قبیله‌ها</strong>
           </div>
           {!w.colonies.length && <p className="muted">هنوز قبیله‌ای نیست. آدم‌ها وقتی با هم دوست شوند قبیله می‌سازند.</p>}
           {w.colonies.map((c) => {
@@ -617,6 +701,7 @@ function PersonPanel({ w, p, ai, talking, whisper, setWhisper, onSpeak, select, 
     </button>
   );
   const mood = moodOf(w, p);
+  const faith = religionOf(w, p.religion);
   const god = (id) => {
     if (id === "rich") {
       p.wealth += 50;
@@ -637,12 +722,21 @@ function PersonPanel({ w, p, ai, talking, whisper, setWhisper, onSpeak, select, 
               {isAdult(p) ? "" : "کودک، "}
               {fa(Math.floor(p.age))} ساله · سر {SHAPE_NAMES[p.shape]} · {moodWord(h)}
             </small>
-            {col && (
-              <small className="chip">
-                {col.leader === p.id ? "👑 رهبر " : ""}
-                {col.name}
-              </small>
-            )}
+            <div className="chips">
+              {col && (
+                <small className="chip">
+                  {col.leader === p.id ? "👑 رهبر " : ""}
+                  {col.name}
+                </small>
+              )}
+              {faith && (
+                <small className="chip" style={{ "--c": faith.color }}>
+                  {p.prophet ? "📿 پیامبر " : ""}
+                  {faith.symbol} {faith.name}
+                </small>
+              )}
+              {p.role && <small className="chip dark">{ROLES[p.role]}</small>}
+            </div>
           </div>
         </div>
         <div className="head-buttons">
@@ -760,7 +854,12 @@ function PersonPanel({ w, p, ai, talking, whisper, setWhisper, onSpeak, select, 
   );
 }
 
+// Never show what lies beyond the edge of the world.
 function clampCam(cam, w, vw, vh) {
-  cam.x = clamp(cam.x, 0, w.W);
-  cam.y = clamp(cam.y, 0, w.H);
+  if (!vw || !vh) return;
+  cam.zoom = clamp(cam.zoom, Math.max(vw / w.W, vh / w.H), 2.5);
+  const hw = vw / cam.zoom / 2;
+  const hh = vh / cam.zoom / 2;
+  cam.x = clamp(cam.x, hw, w.W - hw);
+  cam.y = clamp(cam.y, hh, w.H - hh);
 }
