@@ -14,6 +14,9 @@ export const INK = "#111126";
 // it a frown and an anger mark (someone's installment is unpaid), `me`
 // makes it the member themself (a gold coin), and `worried` gives it raised
 // brows, a wobbly mouth and a bead of sweat (their own installment is unpaid).
+// `shape` swaps the coin for another head ("square", "tri", "hex", "star"),
+// and `mood` draws a face: "calm", "happy", "sad", "love", "sleep", "scared"
+// or "dead" (no face when omitted).
 export function figureSvg(
   pose = "stand",
   {
@@ -26,6 +29,8 @@ export function figureSvg(
     angry = false,
     me = false,
     worried = false,
+    shape = "coin",
+    mood = "",
   } = {},
 ) {
   const P = {
@@ -63,6 +68,34 @@ export function figureSvg(
     const y = cy + Math.sin(t) * r;
     ridges.push(`M${f(x - 1.5)} ${f(y)}L${f(x - dx + 1.5)} ${f(y + dy)}`);
   }
+  // A head of another shape: the same face and, offset behind it, its back.
+  const head = (x, y, attrs) => {
+    const pts = (n, k, turn = -90) =>
+      Array.from({ length: n }, (_, i) => {
+        const a = ((turn + (i * 360) / n) * Math.PI) / 180;
+        const rr = k(i) * r;
+        return `${f(x + Math.cos(a) * rr)} ${f(y + Math.sin(a) * rr)}`;
+      });
+    if (shape === "square")
+      return `<rect x="${f(x - r * 0.9)}" y="${f(y - r * 0.9)}" width="${f(r * 1.8)}" height="${f(r * 1.8)}" rx="${f(r * 0.32)}" ${attrs}/>`;
+    if (shape === "tri") return `<path d="M${pts(3, () => 1.18, -90).join("L")}Z" ${attrs}/>`;
+    if (shape === "hex") return `<path d="M${pts(6, () => 1.02, 0).join("L")}Z" ${attrs}/>`;
+    if (shape === "star") return `<path d="M${pts(10, (i) => (i % 2 ? 0.72 : 1.2)).join("L")}Z" ${attrs}/>`;
+    return `<circle cx="${x}" cy="${y}" r="${r}" ${attrs}/>`;
+  };
+  // Faces for the game's people.
+  const eyes = (rad = 3.4) =>
+    `<circle cx="${cx - 8}" cy="${cy + 1}" r="${rad}" fill="${INK}" stroke="none"/><circle cx="${cx + 8}" cy="${cy + 1}" r="${rad}" fill="${INK}" stroke="none"/>`;
+  const faces = {
+    calm: `${eyes()}<path d="M${cx - 5} ${cy + 11}H${cx + 5}" stroke-width="3.2" fill="none"/>`,
+    happy: `${eyes()}<path d="M${cx - 9} ${cy + 9}Q${cx} ${cy + 18} ${cx + 9} ${cy + 9}" stroke-width="3.4" fill="none"/>`,
+    sad: `${eyes()}<path d="M${cx - 8} ${cy + 15}Q${cx} ${cy + 8} ${cx + 8} ${cy + 15}" stroke-width="3.4" fill="none"/><path d="M${cx - 8} ${cy + 6}q-2.5 5 0 7q2.5-2 0-7Z" fill="#8fd0ff" stroke-width="1.6"/>`,
+    love: `${[-8, 8].map((d) => `<path transform="translate(${cx + d} ${cy + 1})" d="M0 4C-6 -1 -5 -6 -2.5 -6C-1 -6 0 -5 0 -3.5C0 -5 1 -6 2.5 -6C5 -6 6 -1 0 4Z" fill="#ff4b6e" stroke-width="1.6"/>`).join("")}<path d="M${cx - 7} ${cy + 10}Q${cx} ${cy + 17} ${cx + 7} ${cy + 10}" stroke-width="3.2" fill="none"/>`,
+    sleep: `<path d="M${cx - 12} ${cy + 2}q4 3 8 0M${cx + 4} ${cy + 2}q4 3 8 0" stroke-width="3" fill="none"/><circle cx="${cx}" cy="${cy + 12}" r="2.4" fill="${INK}" stroke="none"/>`,
+    scared: `<circle cx="${cx - 8}" cy="${cy}" r="5.5" fill="#fff" stroke-width="2.6"/><circle cx="${cx + 8}" cy="${cy}" r="5.5" fill="#fff" stroke-width="2.6"/>${eyes(2.2)}<ellipse cx="${cx}" cy="${cy + 13}" rx="3.6" ry="4.6" fill="${INK}" stroke="none"/>`,
+    dead: `<path d="M${cx - 12} ${cy - 3}l8 8M${cx - 4} ${cy - 3}l-8 8M${cx + 4} ${cy - 3}l8 8M${cx + 12} ${cy - 3}l-8 8" stroke-width="3" fill="none"/><path d="M${cx - 6} ${cy + 13}H${cx + 6}" stroke-width="3" fill="none"/>`,
+  };
+  const face2 = mood && !angry && !worried ? (faces[mood] ?? "") : "";
   // Digi Gharz itself: the logo for a face, Digipay's white chevron and the
   // gold coin under it on a blue coin.
   if (logo) face = "#0000ff";
@@ -72,7 +105,7 @@ export function figureSvg(
     : "";
   // Angry: brows down, a frown, and an anger mark over the head (white with
   // an ink outline, so it shows on the red banner too).
-  const mood = angry
+  const angryFace = angry
     ? `<g stroke="${INK}" stroke-width="4" fill="none"><path d="M${cx - 15} ${cy - 11}L${cx - 5} ${cy - 5}M${cx + 15} ${cy - 11}L${cx + 5} ${cy - 5}"/><path d="M${cx - 9} ${cy + 15}Q${cx} ${cy + 7} ${cx + 9} ${cy + 15}"/></g><circle cx="${cx - 8}" cy="${cy + 2}" r="3.2" fill="${INK}" stroke="none"/><circle cx="${cx + 8}" cy="${cy + 2}" r="3.2" fill="${INK}" stroke="none"/>`
     : "";
   const fret = worried
@@ -100,10 +133,10 @@ ${empty ? "" : `<ellipse cx="60" cy="150" rx="29" ry="6" fill="${INK}"/>`}
 <path d="${body}" stroke-width="4"/>
 ${empty ? "" : `<path d="${creases}" fill="none" stroke-width="3"/>`}
 <g transform="rotate(8 ${cx} ${cy})">
-${empty ? "" : `<circle cx="${cx - dx}" cy="${cy + dy}" r="${r}" stroke-width="4" fill="${face}"/>`}
-${empty ? "" : `<path d="${ridges.join("")}" fill="none" stroke-width="3.2"/>`}
-<circle cx="${cx}" cy="${cy}" r="${r}" stroke-width="4" ${empty ? "" : `fill="${face}"`}/>
-${text}${mark}${mood}${fret}
+${empty ? "" : head(cx - dx, cy + dy, `stroke-width="4" fill="${face}"`)}
+${empty || shape !== "coin" ? "" : `<path d="${ridges.join("")}" fill="none" stroke-width="3.2"/>`}
+${head(cx, cy, `stroke-width="4" ${empty ? "" : `fill="${face}"`}`)}
+${text}${mark}${angryFace}${fret}${face2}
 </g>${vein}${sweat}
 </g>${badge}</svg>`;
 }
