@@ -4,7 +4,7 @@ import { Figure } from "./Figure.jsx";
 
 export default function Example() {
   return (
-    <div dir="rtl" style={{ display: "grid", gap: 24, padding: 16 }}>
+    <div dir="rtl" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 24, padding: 16 }}>
       {/* A plain crowd of 12. */}
       <CoinCrowd title="با هم، زودتر به پول برسید" text="هر ماه یکی از جمع، کل مبلغ را یک‌جا می‌گیرد." count={12} />
 
@@ -29,7 +29,7 @@ export default function Example() {
       />
 
       {/* Single figures (SVG). */}
-      <div style={{ display: "flex", gap: 12, alignItems: "end" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "end" }}>
         <Figure size={80} />
         <Figure size={80} pose="a" me />
         <Figure size={80} logo />
