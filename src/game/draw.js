@@ -6,6 +6,8 @@ import { DAY, ADULT, byId, colonyOf, happiness, houseOf } from "./world.js";
 import { religionOf } from "./crusade.js";
 import { seeded } from "./terrain.js";
 import { CELL } from "./ants.js";
+import { drawBullet, drawCivic, drawFallout, drawFlat, drawMissiles, drawNuke, isFlat, modernHouse } from "./draw-tech.js";
+import { weaponLevel } from "./tech.js";
 
 const PERSON_H = 66; // an adult's height in world px
 const FONT = `"Estedad Variable", "Vazirmatn Variable", Tahoma, sans-serif`;
@@ -631,6 +633,8 @@ export function render(ctx, w, cam, vw, vh, { selected, now, trails }) {
   roads(ctx, w);
   wornPaths(ctx, w, view);
   if (trails) scents(ctx, w, view);
+  drawFallout(ctx, w);
+  for (const b of w.houses) if (isFlat(b) && b.x > view.x0 - 600 && b.x < view.x1 + 600) drawFlat(ctx, w, b, now);
   for (const e of w.effects) groundEffect(ctx, w, e);
   cloudShadows(ctx, w, now);
   drawFish(ctx, now);
@@ -639,7 +643,7 @@ export function render(ctx, w, cam, vw, vh, { selected, now, trails }) {
   const items = [
     ...w.trees.map((o) => [o.y, 0, o]),
     ...w.rocks.map((o) => [o.y, 1, o]),
-    ...w.houses.map((o) => [o.y, 2, o]),
+    ...w.houses.filter((o) => !isFlat(o)).map((o) => [o.y, 2, o]),
     ...w.coins.map((o) => [o.y, 3, o]),
     ...w.people.map((o) => [o.y + (o.carried ? 3000 : 0), 4, o]),
     [w.holy.y, 5, w.holy],
@@ -656,6 +660,7 @@ export function render(ctx, w, cam, vw, vh, { selected, now, trails }) {
     else drawShrine(ctx, w, now, lights);
   }
   drawArrows(ctx, w);
+  drawMissiles(ctx, w, lights);
   drawFlies(ctx, w, now, night, lights);
   for (const e of w.effects) skyEffect(ctx, w, e, lights);
   drawBirds(ctx, now);
@@ -1036,7 +1041,7 @@ function drawBuilding(ctx, w, h, now, dark, lights) {
   const col = h.colony && colonyOf(w, h.colony);
   ctx.lineWidth = 3;
   ctx.strokeStyle = INK;
-  const big = h.kind === "temple" || h.kind === "keep";
+  const big = h.kind !== "house";
   if (h.ruined) {
     ctx.fillStyle = "#8d7b6a";
     const k = big ? 1.8 : 1;
@@ -1065,7 +1070,9 @@ function drawBuilding(ctx, w, h, now, dark, lights) {
   if (h.built < 1) return scaffold(ctx, h, big);
   if (h.kind === "temple") temple(ctx, w, h, now);
   else if (h.kind === "keep") keep(ctx, w, h, col, now);
-  else house(ctx, w, h, col, now);
+  else if (h.kind === "house" && h.level >= 3) modernHouse(ctx, w, h, col, now, dark, lights);
+  else if (h.kind === "house") house(ctx, w, h, col, now);
+  else drawCivic(ctx, w, h, now, dark, lights);
   const maxHp = h.maxHp ?? 100;
   if (h.hp < maxHp) hpBar(ctx, h.x, h.y + 10, h.hp / maxHp);
   if (h.fire > 0) {
@@ -1074,8 +1081,8 @@ function drawBuilding(ctx, w, h, now, dark, lights) {
   }
   // Warm windows at night.
   if (dark > 0.1) {
-    if (h.kind === "house") lights.push({ x: h.x + 22, y: h.y - 30, r: 70, c: "255,200,110", k: 0.9 });
-    else lights.push({ x: h.x, y: h.y - 50, r: 170, c: "255,210,130", k: 1 });
+    if (h.kind === "house" && h.level < 3) lights.push({ x: h.x + 22, y: h.y - 30, r: 70, c: "255,200,110", k: 0.9 });
+    else if (h.kind === "temple" || h.kind === "keep") lights.push({ x: h.x, y: h.y - 50, r: 170, c: "255,210,130", k: 1 });
   }
 }
 
@@ -1438,13 +1445,17 @@ function drawArrows(ctx, w) {
   ctx.strokeStyle = INK;
   for (const a of w.arrows) {
     const k = Math.min(1, (w.t - a.t0) / a.dur);
-    const arc = Math.hypot(a.x1 - a.x0, a.y1 - a.y0) * 0.35;
+    const arc = a.bullet ? 0 : Math.hypot(a.x1 - a.x0, a.y1 - a.y0) * 0.35;
     const x = a.x0 + (a.x1 - a.x0) * k;
     const y = a.y0 + (a.y1 - a.y0) * k - Math.sin(k * Math.PI) * arc;
     const k2 = Math.min(1, k + 0.05);
     const x2 = a.x0 + (a.x1 - a.x0) * k2;
     const y2 = a.y0 + (a.y1 - a.y0) * k2 - Math.sin(k2 * Math.PI) * arc;
     const ang = Math.atan2(y2 - y, x2 - x);
+    if (a.bullet) {
+      drawBullet(ctx, a, x, y, ang);
+      continue;
+    }
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(ang);
@@ -1541,7 +1552,7 @@ function drawPerson(ctx, w, p, now, selected, dark, lights) {
   // A banner behind the bearer.
   if (p.role === "bearer" && p.alive) bannerPole(ctx, h, faith, col, now);
   if (img) ctx.drawImage(img, -wd / 2, -h * (150 / 160), wd, h);
-  if (p.alive && !lying) gear(ctx, p, h, k, faith, col, now);
+  if (p.alive && !lying) gear(ctx, p, h, k, faith, col, now, weaponLevel(w, p));
   if (wet) ctx.restore();
   ctx.restore();
 
@@ -1594,7 +1605,7 @@ function drawPerson(ctx, w, p, now, selected, dark, lights) {
 
 // Helmets, shields, swords, bows, fishing rods — in the figure's own frame
 // (already flipped to face the right way).
-function gear(ctx, p, h, k, faith, col, now) {
+function gear(ctx, p, h, k, faith, col, now, lvl = 0) {
   const headX = 0.033 * h * 0.75;
   const headY = -0.669 * h;
   const R = 0.175 * h;
@@ -1619,8 +1630,8 @@ function gear(ctx, p, h, k, faith, col, now) {
     ctx.fill();
   }
   if (!p.army) return;
-  // Helmet.
-  ctx.fillStyle = "#a9b1c2";
+  // Helmet: bronze, iron, then a soldier's steel helmet.
+  ctx.fillStyle = lvl >= 4 ? "#5b7a45" : lvl === 1 ? "#d8a15a" : "#a9b1c2";
   ctx.lineWidth = 2.5;
   ctx.beginPath();
   ctx.arc(headX, headY, R * 1.08, Math.PI * 1.05, Math.PI * 1.95);
@@ -1635,6 +1646,33 @@ function gear(ctx, p, h, k, faith, col, now) {
     ctx.stroke();
   }
   const color = faith?.color ?? col?.color ?? "#fff";
+  // Guns: a musket, later a rifle.
+  if (lvl >= 3 && p.role !== "bearer") {
+    const aim = k?.type === "shoot" ? -0.12 : -0.9;
+    ctx.save();
+    ctx.translate(0.12 * h, -0.4 * h);
+    ctx.rotate(aim);
+    ctx.fillStyle = lvl >= 4 ? "#2b2f36" : "#6b4a2b";
+    ctx.lineWidth = 2;
+    roundRect(ctx, -0.12 * h, -3, 0.24 * h, 7, 3);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#3b3f47";
+    roundRect(ctx, 0.1 * h, -2, 0.42 * h, 4, 2);
+    ctx.fill();
+    ctx.stroke();
+    if (k?.type === "shoot" && (k.aim ?? 1) > 1.25) {
+      ctx.fillStyle = "#ffd84d";
+      ctx.beginPath();
+      ctx.moveTo(0.52 * h, -6);
+      ctx.lineTo(0.66 * h, 0);
+      ctx.lineTo(0.52 * h, 6);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+    return;
+  }
   if (p.role === "archer") {
     // Bow and quiver.
     ctx.strokeStyle = "#6b4a2b";
@@ -1663,13 +1701,14 @@ function gear(ctx, p, h, k, faith, col, now) {
   ctx.save();
   ctx.translate(0.2 * h, -0.34 * h);
   ctx.rotate(-0.5 + swing);
-  ctx.fillStyle = "#e6e9f0";
+  ctx.fillStyle = lvl === 1 ? "#e0a860" : lvl === 0 ? "#9a6b3f" : "#e6e9f0";
   ctx.lineWidth = 2;
+  const blade = lvl >= 2 ? 0.5 : 0.42;
   ctx.beginPath();
   ctx.moveTo(-2.5, 0);
-  ctx.lineTo(-2.5, -0.42 * h);
-  ctx.lineTo(0, -0.47 * h);
-  ctx.lineTo(2.5, -0.42 * h);
+  ctx.lineTo(-2.5, -blade * h);
+  ctx.lineTo(0, -(blade + 0.05) * h);
+  ctx.lineTo(2.5, -blade * h);
   ctx.lineTo(2.5, 0);
   ctx.closePath();
   ctx.fill();
@@ -1888,6 +1927,9 @@ function skyEffect(ctx, w, e, lights) {
       lights.push({ x: e.x, y: e.y - 100, r: 500, c: "220,230,255", k: 2 * fade });
       break;
     }
+    case "nuke":
+      drawNuke(ctx, w, e, lights);
+      break;
     case "beam": {
       // A column of light from the sky.
       const a = Math.min(1, age * 3) * fade;

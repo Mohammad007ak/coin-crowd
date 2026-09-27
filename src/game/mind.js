@@ -75,6 +75,7 @@ export function describe(w, p) {
       .map((r) => `${r.name} (${followersOf(w, r).length})${faith && r !== faith ? `, our grievance against them ${Math.round(faith.grief[r.id] ?? 0)}` : ""}`)
       .join("; ")}. Active holy wars: ${w.armies.filter((a) => a.kind === "crusade").map((a) => `${a.name} by ${religionOf(w, a.religion)?.name} (${a.state})`).join("; ") || "none"}. Season: ${w.season}, weather: ${w.weather.type}.`,
   );
+  if (col?.tech) lines.push(`Our tribe knows: ${col.tech.known.join(", ") || "nothing yet"}; researching ${col.tech.research ?? "nothing"}.${w.un ? ` The United Nations exists (${w.un.members.includes(col.id) ? "we are members" : "we are not members"}).` : ""}`);
   lines.push(`Home: ${home ? (home.ruined ? "ruined" : home.built < 1 ? "under construction" : "has a house") : "homeless"} (a house costs 20 coins).`);
   lines.push(`Spouse: ${p.spouse ? nameOf(w, p.spouse) : "none"}. Children: ${p.kids.map((id) => nameOf(w, id)).join(", ") || "none"}. Parents: ${p.parents.map((id) => nameOf(w, id)).join(", ") || "unknown"}.`);
   if (col) {

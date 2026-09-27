@@ -27,6 +27,7 @@ import { MODELS, pickThinker, think } from "./mind.js";
 import { SHAPE_NAMES, clamp, fa, pick } from "./util.js";
 import { followersOf, religionOf, revelation } from "./crusade.js";
 import { DRIVES, NET, SENSES, forward } from "./brain.js";
+import { ERAS, TECHS, eraOf, knows, techById } from "./tech.js";
 import { senses } from "./world.js";
 import { WEATHERS, seasonOf } from "./terrain.js";
 import "./game.css";
@@ -96,7 +97,7 @@ export default function Game() {
   const worldRef = useRef(null);
   if (!worldRef.current) {
     const saved = load(SAVE_KEY, null);
-    worldRef.current = saved?.version === 3 ? revive(saved) : createWorld();
+    worldRef.current = saved?.version === 4 ? revive(saved) : createWorld();
   }
   // Start looking at the western town.
   const camRef = useRef({ x: worldRef.current.W * 0.3, y: worldRef.current.H * 0.45, zoom: 0.75 });
@@ -445,6 +446,7 @@ export default function Game() {
   const toolInfo = POWERS.find((p) => p.id === tool);
   const hour = (w.t % DAY) / DAY;
   const holyOwner = religionOf(w, w.holy.owner);
+  const topEra = Math.max(0, ...w.colonies.map(eraOf));
 
   return (
     <div className="game" dir="rtl">
@@ -473,6 +475,8 @@ export default function Game() {
             {WEATHERS[w.weather.type].icon}
           </span>
           <span title="جمعیت">👥 {fa(living.length)}</span>
+          <span title={`پیشرفته‌ترین قبیله: ${ERAS[topEra].name}`}>{ERAS[topEra].icon}</span>
+          {w.un && <span title="سازمان ملل">🇺🇳</span>}
           <span title="بالاترین نسلِ مغزها (تکامل)">🧬 {fa(Math.max(1, ...living.map((p) => p.brain?.gen ?? 1)))}</span>
           <span title="شهر مقدس" className="holy-chip" style={{ "--c": holyOwner?.color ?? "#999" }}>
             🏛️ {holyOwner ? holyOwner.symbol : "—"}
@@ -495,6 +499,9 @@ export default function Game() {
         <div className="menu">
           <button className={trails ? "on" : ""} onClick={() => setTrails(!trails)} title="ردّ غذا (سبز) و بوی خطر (قرمز)، مثل مورچه‌ها">
             🐜 <span>ردپاها</span>
+          </button>
+          <button className={panel === "tech" ? "on" : ""} onClick={() => setPanel(panel === "tech" ? null : "tech")}>
+            🎓 <span>دانش</span>
           </button>
           <button className={panel === "log" ? "on" : ""} onClick={() => setPanel(panel === "log" ? null : "log")}>
             📜 <span>رویدادها</span>
@@ -605,6 +612,65 @@ export default function Game() {
                         </span>
                       );
                     })}
+                </div>
+              </div>
+            );
+          })}
+        </aside>
+      )}
+
+      {panel === "tech" && (
+        <aside className="panel side">
+          <div className="panel-head">
+            <strong>🎓 دانش و پیشرفت</strong>
+            <button onClick={() => setPanel(null)}>✕</button>
+          </div>
+          <p className="muted">
+            هر قبیله با کار، کتابخانه، دانشگاه و صلح دانش جمع می‌کند و چیز تازه‌ای کشف می‌کند. رهبرِ جنگ‌طلب دنبال سلاح و دیوار است، رهبرِ مهربان دنبال کشاورزی
+            و دانشگاه، رهبرِ پول‌دوست دنبال بازار و صنعت. دانش بین قبیله‌هایی که با هم خوب‌اند پخش می‌شود.
+          </p>
+          {w.un && (
+            <div className="tribe faith" style={{ "--c": "#4aa3ff" }}>
+              <button className="tribe-name" onClick={() => {
+                const b = w.houses.find((h) => h.id === w.un.building);
+                if (b) goTo(b.x, b.y);
+              }}>
+                🇺🇳 سازمان ملل
+              </button>
+              <small>
+                از روز {fa(w.un.founded + 1)} · اعضا: {w.un.members.map((id) => w.colonies.find((c) => c.id === id)?.name).filter(Boolean).join("، ")}
+              </small>
+            </div>
+          )}
+          {!w.colonies.length && <p className="muted">هنوز قبیله‌ای نیست.</p>}
+          {w.colonies.map((c) => {
+            const era = eraOf(c);
+            const r = c.tech?.research && techById[c.tech.research];
+            const c0 = colonyCenter(w, c);
+            return (
+              <div key={c.id} className="tribe" style={{ "--c": c.color }}>
+                <button className="tribe-name" onClick={() => goTo(c0.x, c0.y)}>
+                  {ERAS[era].icon} {c.name}
+                </button>
+                <small>
+                  {ERAS[era].name} · 📖 {fa(c.tech?.points ?? 0)} دانش در روز
+                </small>
+                {r && (
+                  <div className="research">
+                    <span>
+                      در حال کشف: {r.icon} {r.name}
+                    </span>
+                    <div className="bar-line">
+                      <i style={{ width: `${Math.min(100, (c.tech.progress / r.cost) * 100)}%`, background: c.color }} />
+                    </div>
+                  </div>
+                )}
+                <div className="techs">
+                  {TECHS.map((t) => (
+                    <span key={t.id} className={knows(c, t.id) ? "known" : c.tech?.research === t.id ? "now" : ""} title={`${t.name} — ${t.what}`}>
+                      {t.icon}
+                    </span>
+                  ))}
                 </div>
               </div>
             );

@@ -634,3 +634,63 @@ summary {
   font-family: var(--font);
   fill: var(--ink);
 }
+
+/* ---------- knowledge ---------- */
+.research {
+  font-size: 0.78rem;
+  font-weight: 700;
+  margin: 4px 0;
+}
+.bar-line {
+  height: 8px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  overflow: hidden;
+  background: #fff;
+  margin-top: 3px;
+}
+.bar-line i {
+  display: block;
+  height: 100%;
+}
+.techs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 6px;
+}
+.techs span {
+  font-size: 1.05rem;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  border: 1.5px dashed #11112633;
+  filter: grayscale(1);
+  opacity: 0.35;
+}
+.techs span.known {
+  filter: none;
+  opacity: 1;
+  border: 2px solid var(--ink);
+  background: #fff;
+}
+.techs span.now {
+  filter: none;
+  opacity: 0.8;
+  border: 2px dashed var(--ink);
+  animation: crowd-hint 1.6s ease-in-out infinite;
+}
+.news-item.tech {
+  background: #e9f7ee;
+}
+.news-item.nuke {
+  background: #1f2a12;
+  color: #d9ff7a;
+  border-color: #000;
+  font-size: 1.05rem;
+}
+.news-item.un {
+  background: #e3f0ff;
+}

@@ -19,6 +19,19 @@ import {
   say,
 } from "./util.js";
 import { childBrain, forward, learn, newBrain, tilt } from "./brain.js";
+import {
+  WEAPON_DAMAGE,
+  farmDay,
+  inspire,
+  knowsP,
+  launchAt,
+  newTech,
+  shareKnowledge,
+  techDay,
+  techTick,
+  wallShield,
+  weaponLevel,
+} from "./tech.js";
 import { evaporate, lay, makePheromones, smell, sniff, splash } from "./ants.js";
 import { buildable, isWater, makeTerrain, reviveTerrain, rollWeather, seasonOf, SEASON_DAYS, WEATHERS } from "./terrain.js";
 import {
@@ -49,7 +62,7 @@ export function createWorld() {
   const W = 3600;
   const H = 1700;
   const w = {
-    version: 3,
+    version: 4,
     t: 0,
     day: 0,
     W,
@@ -64,6 +77,9 @@ export function createWorld() {
     religions: [],
     armies: [],
     arrows: [],
+    missiles: [],
+    fallout: [],
+    un: null,
     effects: [],
     events: [],
     announcements: [],
@@ -309,7 +325,9 @@ export function happiness(w, p) {
   );
 }
 
+const faDigits = (t) => String(t).replace(/\d/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[d]);
 export function log(w, text, at = null, kind = "info") {
+  text = faDigits(text);
   w.events.push({ id: w.nextId++, t: w.t, day: w.day, text, x: at?.x, y: at?.y, kind });
   if (w.events.length > 250) w.events.splice(0, w.events.length - 250);
 }
@@ -325,7 +343,7 @@ export const fx = (w, type, x, y, dur, extra = {}) => w.effects.push({ type, x, 
 // Big news: shown across the screen, and kept in the log.
 export function announce(w, text, at = null, kind = "news") {
   log(w, text, at, kind);
-  w.announcements.push({ id: w.nextId++, text, t: w.t, kind, x: at?.x, y: at?.y });
+  w.announcements.push({ id: w.nextId++, text: faDigits(text), t: w.t, kind, x: at?.x, y: at?.y });
   if (w.announcements.length > 20) w.announcements.shift();
 }
 
@@ -354,6 +372,7 @@ function step1(w, dt) {
   evaporate(w.pher, dt);
   weatherTick(w, dt);
   faithTick(w, dt);
+  techTick(w, dt);
   housesTick(w, dt);
   treesTick(w, dt);
   coinsTick(w, dt);
@@ -555,6 +574,9 @@ function decide(w, p) {
     const known = w.trees.find((t) => t.id === p.knownTree);
     const tree = nearest(w.trees, p, ripe, SIGHT) ?? (known && ripe(known) && dist(known, p) < 1000 ? known : null) ?? (p.food < 12 ? nearest(w.trees, p, ripe) : null);
     if (!tree) add(((60 - p.food) / 60) * 1.4, () => ({ type: "forage", until: until(25) }), "eat");
+    // The tribe's farms.
+    const farm = nearest(w.houses, p, (b) => b.kind === "farm" && b.built >= 1 && !b.ruined && b.crop > 0 && (b.colony === p.colony || !b.colony), 900);
+    if (farm) add(((60 - p.food) / 60) * 1.9 + (p.food < 20 ? 1.2 : 0), () => ({ type: "harvest", house: farm.id, until: until(40) }), "eat");
     if (tree) add(((60 - p.food) / 60) * 1.8 + (p.food < 20 ? 1 : 0) + (p.food < 10 ? 2 : 0), () => ({ type: "gather", tree: tree.id, until: until(40) }), "eat");
     else if (p.food < 25 && chance(0.3)) speak(w, p, say("hungry"));
     const spot = fishingSpot(w, p);
@@ -591,7 +613,9 @@ function decide(w, p) {
     if (empty) add(1.1, () => ({ type: "claim", house: empty.id, until: until(40) }), "home");
     else if (p.wealth >= HOUSE_COST) add(1.2, () => buildTask(w, p), "home");
   } else if (home.built < 1) add(1.3, () => ({ type: "build", house: home.id, until: until(40) }), "home");
-  else if (home.owner === p.id && home.kind === "house" && home.level < 2 && p.wealth > 45)
+  else if (home.owner === p.id && home.kind === "house" && home.level < 2 && p.wealth > 45 && (knowsP(w, p, "masonry") || !p.colony))
+    add(0.9, () => ({ type: "upgrade", house: home.id, until: until(40) }), "home");
+  else if (home.owner === p.id && home.kind === "house" && home.level === 2 && p.wealth > 90 && knowsP(w, p, "industry"))
     add(0.9, () => ({ type: "upgrade", house: home.id, until: until(40) }), "home");
   // The tribe's temple or castle going up.
   const works = p.colony && nearest(w.houses, p, (b) => b.colony === p.colony && b.kind !== "house" && b.built < 1 && !b.ruined, 900);
@@ -777,6 +801,24 @@ function runTask(w, p, dt) {
       if (arrived(p)) k.idle = (k.idle ?? rand(1, 3)) - dt;
       if (k.idle < 0) done(p);
       return;
+    case "harvest": {
+      const f = houseOf(w, k.house);
+      if (!f || f.ruined || !(f.crop > 0)) return done(p);
+      if (k.side == null) k.side = rand(-1, 1);
+      goTo(p, f.x + k.side * 60, f.y + rand(-4, 4));
+      if (arrived(p, 20)) {
+        k.working = true;
+        k.left = (k.left ?? 2.5) - dt;
+        if (k.left < 0) {
+          f.crop--;
+          p.food = Math.min(100, p.food + 45);
+          p.trail = w.t + 12;
+          fx(w, "pop", p.x, p.y - 70, 0.7, { text: "🌾" });
+          done(p);
+        }
+      }
+      return;
+    }
     case "forage": {
       // Like an ant: follow the food trail cell by cell until a tree is in sight.
       const tree = nearest(w.trees, p, (t) => t.fruit > 0 && !t.dead && !t.burn, SIGHT);
@@ -852,17 +894,19 @@ function runTask(w, p, dt) {
       return;
     case "upgrade": {
       const h = houseOf(w, k.house);
-      if (!h || h.ruined || h.level >= 2 || p.wealth < 25) return done(p);
+      const next = h?.level >= 2 ? 3 : 2;
+      const price = next === 3 ? 60 : 25;
+      if (!h || h.ruined || h.level >= 3 || p.wealth < price) return done(p);
       goTo(p, h.x + 34, h.y + 10);
       if (arrived(p)) {
         k.working = true;
         k.left = (k.left ?? 7) - dt;
         if (k.left < 0) {
-          p.wealth -= 25;
-          h.level = 2;
-          h.hp = h.maxHp = 160;
-          remember(w, p, "خانه‌ام را سنگی کردم.");
-          log(w, `🧱 ${p.name} خانه‌اش را سنگی کرد.`, h, "build");
+          p.wealth -= price;
+          h.level = next;
+          h.hp = h.maxHp = next === 3 ? 220 : 160;
+          remember(w, p, next === 3 ? "خانه‌ام را مدرن کردم." : "خانه‌ام را سنگی کردم.");
+          log(w, next === 3 ? `🏢 ${p.name} خانه‌ای مدرن ساخت.` : `🧱 ${p.name} خانه‌اش را سنگی کرد.`, h, "build");
           done(p);
         }
       }
@@ -909,7 +953,8 @@ function runTask(w, p, dt) {
         k.left = (k.left ?? rand(3, 5)) - dt;
         if (chance(dt * 0.1)) speak(w, p, say("work"));
         if (k.left < 0) {
-          const pay = Math.round(2 + T.work * 4 + rand(0, 2));
+          const has = (kind) => p.colony && w.houses.some((b) => b.colony === p.colony && b.kind === kind && b.built >= 1 && !b.ruined);
+          const pay = Math.round((2 + T.work * 4 + rand(0, 2)) * (has("market") ? 1.5 : 1) * (has("factory") ? 1.4 : 1));
           p.wealth += pay;
           p.energy -= 6;
           fx(w, "pop", p.x, p.y - 70, 0.8, { text: `+${pay}🪙` });
@@ -1031,7 +1076,8 @@ function runTask(w, p, dt) {
       }
       if (arrived(p, 22)) {
         k.working = true;
-        h.hp -= dt * 7;
+        const wall = w.houses.find((b) => b.kind === "wall" && b.colony === h.colony && b.built >= 1 && !b.ruined && b !== h);
+        h.hp -= dt * 7 * (wall ? 0.5 : 1) * (1 + weaponLevel(w, p) * 0.2);
         if (chance(dt * 0.08)) h.fire = Math.max(h.fire, 0.4); // a torch
         if (h.hp <= 0) ruin(w, h, `${p.name} در جنگ`);
       }
@@ -1102,6 +1148,7 @@ function meet(w, p, dt) {
     } else {
       speak(w, q, say(d > 8 ? "like" : "chat", p));
       if (d > 12 && chance(0.4)) fx(w, "heart", (p.x + q.x) / 2, p.y - 80, 1.2);
+      if (d > 6) shareKnowledge(w, p, q);
     }
     if (Math.abs(d) > 10 && chance(0.5)) remember(w, p, `با ${q.name} حرف زدم؛ ${d > 0 ? "خوب بود." : "بد پیش رفت."}`);
   }
@@ -1175,7 +1222,7 @@ function fight(w, p, q, dt) {
   }
   if (k.hit <= 0) {
     k.hit = 0.8;
-    const dmg = (4 + p.traits.aggr * 6 + p.traits.brave * 2) * rand(0.5, 1.2);
+    const dmg = (4 + p.traits.aggr * 6 + p.traits.brave * 2) * rand(0.5, 1.2) * WEAPON_DAMAGE[weaponLevel(w, p)] * wallShield(w, q) / (1 + weaponLevel(w, q) * 0.12);
     fx(w, "hit", (p.x + q.x) / 2, p.y - 45, 0.35);
     hurt(w, q, dmg, "دعوا", p.id);
     if (!q.alive) {
@@ -1336,6 +1383,8 @@ function dayTick(w) {
   tribes(w);
   politics(w);
   faithDay(w);
+  farmDay(w);
+  techDay(w);
 }
 
 function births(w) {
@@ -1432,6 +1481,7 @@ export function foundColony(w, p, with_ = [], quiet = false) {
     status: {},
     since: {},
     founded: w.day,
+    tech: newTech([p, ...with_]),
   };
   w.colonies.push(c);
   if (!quiet) log(w, `🚩 ${p.name} «${c.name}» را بنیان گذاشت.`, p, "colony");
@@ -1750,6 +1800,8 @@ export const POWERS = [
   { id: "gold", icon: "💰", name: "باران طلا" },
   { id: "bless", icon: "✨", name: "برکت", hint: "شفا، شادی و ایمان" },
   { id: "miracle", icon: "🕊️", name: "معجزه", hint: "بی‌دین‌ها به آیینِ آن‌جا می‌گروند" },
+  { id: "inspire", icon: "💡", name: "الهام", hint: "نزدیک‌ترین قبیله یک کشف تازه می‌کند" },
+  { id: "nuke", icon: "☢️", name: "بمب اتم", hint: "همه‌چیز در شعاع زیادی نابود می‌شود" },
   { id: "discord", icon: "😈", name: "فتنه", hint: "کینه میان قوم‌ها و آیین‌ها" },
   { id: "rain", icon: "🌧️", name: "باران", hint: "آتش را خاموش می‌کند و میوه می‌دهد" },
   { id: "tree", icon: "🌳", name: "درخت" },
@@ -1923,6 +1975,16 @@ export function power(w, id, x, y) {
       log(w, "😈 خدا در دل مردم کینه کاشت.", at, "god");
       return;
     }
+    case "inspire": {
+      fx(w, "bless", x, y, 1.5);
+      const c = inspire(w, x, y);
+      if (!c) log(w, "💡 خدا الهام فرستاد، ولی قبیله‌ای آن نزدیکی نبود.", at, "god");
+      return;
+    }
+    case "nuke":
+      launchAt(w, x, y);
+      announce(w, "☢️ خدا از آسمان بمب اتم فرستاد!", at, "nuke");
+      return;
     case "rain":
       fx(w, "rain", x, y, 3);
       for (const h of w.houses) if (Math.hypot(h.x - x, h.y - y) < 260) h.fire = 0;

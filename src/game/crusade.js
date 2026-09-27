@@ -23,7 +23,8 @@ import {
   speak,
 } from "./world.js";
 import { nearestBridge, side } from "./terrain.js";
-import { chance, clamp, dist, pick, rand } from "./util.js";
+import { chance, clamp, dist, fa, pick, rand } from "./util.js";
+import { WEAPON_DAMAGE, shooter, wallShield, weaponLevel } from "./tech.js";
 
 export const FAITHS = [
   { name: "آیین خورشید", symbol: "☀️", color: "#f59e0b", god: "خورشیدِ بزرگ" },
@@ -248,7 +249,7 @@ export function declareHolyWar(w, r, enemy, caller = null) {
     id: w.nextId++,
     kind: "crusade",
     n,
-    name: `جنگ مقدس ${ORDINALS[n - 1] ?? n}`,
+    name: `جنگ مقدس ${ORDINALS[n - 1] ?? fa(n)}`,
     religion: r.id,
     enemy: enemy?.id ?? null,
     commander: commander.id,
@@ -464,7 +465,7 @@ export function soldierTask(w, p) {
       if (d < fd) (fd = d), (foe = q);
     }
     if (foe) {
-      if (p.role === "archer") return { type: "shoot", target: foe.id, until: w.t + 2.5 };
+      if (p.role === "archer" || (shooter(w, p) && p.role !== "bearer")) return { type: "shoot", target: foe.id, until: w.t + 2.5 };
       if (p.role !== "bearer") return { type: "fight", target: foe.id, until: w.t + 5, war: true, started: false };
     }
     // Besieging a town: burn its buildings.
@@ -480,7 +481,19 @@ export function soldierTask(w, p) {
 // Arrows fly in an arc; they hit if the target is still roughly there.
 export function shoot(w, p, q) {
   const d = dist(p, q);
-  w.arrows.push({ x0: p.x, y0: p.y - 40, x1: q.x + rand(-10, 10), y1: q.y - 30, t0: w.t, dur: 0.35 + d / 700, target: q.id, from: p.id });
+  const gun = shooter(w, p);
+  w.arrows.push({
+    x0: p.x,
+    y0: p.y - 40,
+    x1: q.x + rand(-10, 10),
+    y1: q.y - 30,
+    t0: w.t,
+    dur: gun ? 0.12 + d / 3000 : 0.35 + d / 700,
+    target: q.id,
+    from: p.id,
+    bullet: gun,
+    dmg: rand(7, 13) * WEAPON_DAMAGE[weaponLevel(w, p)] * (gun ? 0.8 : 1),
+  });
 }
 function arrowsTick(w) {
   if (!w.arrows.length) return;
@@ -488,7 +501,7 @@ function arrowsTick(w) {
     if (w.t < a.t0 + a.dur) return true;
     const q = byId(w, a.target);
     if (q?.alive && Math.hypot(q.x - a.x1, q.y - 30 - a.y1) < 26 && chance(0.7)) {
-      hurt(w, q, rand(7, 13), "تیر", a.from);
+      hurt(w, q, (a.dmg ?? rand(7, 13)) * wallShield(w, q), a.bullet ? "گلوله" : "تیر", a.from);
       fx(w, "hit", a.x1, a.y1, 0.3);
       const from = byId(w, a.from);
       if (from) addRel(q, from, -10);
