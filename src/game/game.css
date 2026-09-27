@@ -625,3 +625,12 @@ summary {
     padding: 6px 10px;
   }
 }
+
+.brain {
+  width: 100%;
+  height: auto;
+  margin-top: 6px;
+  direction: ltr;
+  font-family: var(--font);
+  fill: var(--ink);
+}

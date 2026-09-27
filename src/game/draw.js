@@ -5,6 +5,7 @@ import { INK, figureSvg } from "../crowd/Figure.jsx";
 import { DAY, ADULT, byId, colonyOf, happiness, houseOf } from "./world.js";
 import { religionOf } from "./crusade.js";
 import { seeded } from "./terrain.js";
+import { CELL } from "./ants.js";
 
 const PERSON_H = 66; // an adult's height in world px
 const FONT = `"Estedad Variable", "Vazirmatn Variable", Tahoma, sans-serif`;
@@ -378,11 +379,50 @@ function ambience(w, cam, vw, vh, now, dt) {
     const dir = Math.random() < 0.5 ? 1 : -1;
     const y = view.y0 + Math.random() * (view.y1 - view.y0) * 0.7;
     const n = 3 + Math.floor(Math.random() * 5);
+    const flock = Math.random();
     for (let i = 0; i < n; i++)
-      amb.birds.push({ x: (dir > 0 ? view.x0 - 60 : view.x1 + 60) - dir * i * 26, y: y + Math.abs(i - n / 2) * 14, v: dir * (110 + Math.random() * 20), ph: Math.random() * 6 });
+      amb.birds.push({
+        x: (dir > 0 ? view.x0 - 60 : view.x1 + 60) - dir * Math.random() * 80,
+        y: y + (Math.random() - 0.5) * 80,
+        vx: dir * 110,
+        vy: (Math.random() - 0.5) * 30,
+        dir,
+        flock,
+        ph: Math.random() * 6,
+      });
   }
-  for (const b of amb.birds) b.x += b.v * dt;
-  amb.birds = amb.birds.filter((b) => b.x > view.x0 - 400 && b.x < view.x1 + 400);
+  // Boids: keep apart, match heading, stay together — and keep going.
+  for (const b of amb.birds) {
+    let sx = 0;
+    let sy = 0;
+    let ax = 0;
+    let ay = 0;
+    let cx = 0;
+    let cy = 0;
+    let n = 0;
+    for (const o of amb.birds) {
+      if (o === b || o.flock !== b.flock) continue;
+      const dx = o.x - b.x;
+      const dy = o.y - b.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > 140 * 140) continue;
+      if (d2 < 22 * 22) (sx -= dx), (sy -= dy);
+      ax += o.vx;
+      ay += o.vy;
+      cx += dx;
+      cy += dy;
+      n++;
+    }
+    if (n) {
+      b.vx += ((ax / n - b.vx) * 0.05 + (cx / n) * 0.01 + sx * 0.05) * dt * 60;
+      b.vy += ((ay / n - b.vy) * 0.05 + (cy / n) * 0.01 + sy * 0.05) * dt * 60;
+    }
+    b.vx += (b.dir * 115 - b.vx) * 0.02 * dt * 60;
+    b.vy += (Math.sin(performance.now() / 1500 + b.flock * 9) * 12 - b.vy) * 0.01 * dt * 60;
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+  }
+  amb.birds = amb.birds.filter((b) => b.x > view.x0 - 500 && b.x < view.x1 + 500);
   // Butterflies in spring and summer days, fireflies on summer nights.
   const wantFlies = (w.season === "spring" || w.season === "summer") && !bad ? 14 : 0;
   while (amb.flies.length < wantFlies)
@@ -565,7 +605,7 @@ function cloudShadows(ctx, w, now) {
 // ---------------------------------------------------------------- frame
 
 let lastNow = 0;
-export function render(ctx, w, cam, vw, vh, { selected, now }) {
+export function render(ctx, w, cam, vw, vh, { selected, now, trails }) {
   const dt = Math.min(0.05, (now - (lastNow || now)) / 1000);
   lastNow = now;
   const { night, view } = ambience(w, cam, vw, vh, now, dt);
@@ -589,6 +629,8 @@ export function render(ctx, w, cam, vw, vh, { selected, now }) {
   ctx.drawImage(landImage(w), 0, 0, w.W, w.H);
   shimmer(ctx, w, view, now);
   roads(ctx, w);
+  wornPaths(ctx, w, view);
+  if (trails) scents(ctx, w, view);
   for (const e of w.effects) groundEffect(ctx, w, e);
   cloudShadows(ctx, w, now);
   drawFish(ctx, now);
@@ -712,6 +754,56 @@ function shimmer(ctx, w, view, now) {
       ctx.stroke();
     }
   }
+  ctx.restore();
+}
+
+// Where many feet have passed, the grass wears into a dirt path.
+function wornPaths(ctx, w, view) {
+  const ph = w.pher;
+  if (!ph) return;
+  const c0 = Math.max(0, Math.floor(view.x0 / CELL) - 1);
+  const c1 = Math.min(ph.cols - 1, Math.ceil(view.x1 / CELL) + 1);
+  const r0 = Math.max(0, Math.floor(view.y0 / CELL) - 1);
+  const r1 = Math.min(ph.rows - 1, Math.ceil(view.y1 / CELL) + 1);
+  ctx.save();
+  ctx.fillStyle = w.season === "winter" ? "#c8bba6" : "#c4a470";
+  for (let r = r0; r <= r1; r++)
+    for (let c = c0; c <= c1; c++) {
+      const v = ph.walk[r * ph.cols + c];
+      if (v < 0.8) continue;
+      ctx.globalAlpha = Math.min(0.5, (v - 0.8) / 5);
+      ctx.beginPath();
+      ctx.ellipse((c + 0.5) * CELL, (r + 0.5) * CELL, CELL * 0.62, CELL * 0.4, 0, 0, 7);
+      ctx.fill();
+    }
+  ctx.restore();
+}
+
+// The ants' view: food trails in green, the smell of danger in red.
+function scents(ctx, w, view) {
+  const ph = w.pher;
+  if (!ph) return;
+  const c0 = Math.max(0, Math.floor(view.x0 / CELL));
+  const c1 = Math.min(ph.cols - 1, Math.ceil(view.x1 / CELL));
+  const r0 = Math.max(0, Math.floor(view.y0 / CELL));
+  const r1 = Math.min(ph.rows - 1, Math.ceil(view.y1 / CELL));
+  ctx.save();
+  for (let r = r0; r <= r1; r++)
+    for (let c = c0; c <= c1; c++) {
+      const i = r * ph.cols + c;
+      const x = (c + 0.5) * CELL;
+      const y = (r + 0.5) * CELL;
+      if (ph.danger[i] > 0.2) {
+        ctx.fillStyle = `rgba(255,60,50,${Math.min(0.45, ph.danger[i] / 10)})`;
+        ctx.fillRect(x - CELL / 2, y - CELL / 2, CELL, CELL);
+      }
+      if (ph.food[i] > 0.15) {
+        ctx.fillStyle = `rgba(40,200,90,${Math.min(0.9, 0.25 + ph.food[i] / 6)})`;
+        ctx.beginPath();
+        ctx.arc(x, y, 4 + Math.min(10, ph.food[i] * 2), 0, 7);
+        ctx.fill();
+      }
+    }
   ctx.restore();
 }
 

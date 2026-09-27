@@ -18,6 +18,8 @@ import {
   randInt,
   say,
 } from "./util.js";
+import { childBrain, forward, learn, newBrain, tilt } from "./brain.js";
+import { evaporate, lay, makePheromones, smell, sniff, splash } from "./ants.js";
 import { buildable, isWater, makeTerrain, reviveTerrain, rollWeather, seasonOf, SEASON_DAYS, WEATHERS } from "./terrain.js";
 import {
   FAITHS,
@@ -39,6 +41,7 @@ export const ADULT = 16;
 export const ELDER = 60;
 const HOUSE_COST = 20;
 const SPEED = 70; // walking speed, world px per second
+const SIGHT = 300; // how far people can see a fruit tree
 
 // ---------------------------------------------------------------- creation
 
@@ -46,7 +49,7 @@ export function createWorld() {
   const W = 3600;
   const H = 1700;
   const w = {
-    version: 2,
+    version: 3,
     t: 0,
     day: 0,
     W,
@@ -69,6 +72,7 @@ export function createWorld() {
     weather: { type: "clear", until: DAY * 0.6 },
     season: "spring",
     terrain: makeTerrain(W, H, Math.floor(Math.random() * 1e9)),
+    pher: makePheromones(W, H),
     stats: { born: 0, died: 0, married: 0, wars: 0, crusades: 0 },
   };
   const t = w.terrain;
@@ -168,7 +172,7 @@ export function findSpot(w, x0, y0, r, gap = 110) {
   for (let i = 0; i < 40; i++) {
     const x = clamp(x0 + rand(-r, r), 80, w.W - 80);
     const y = clamp(y0 + rand(-r, r) * 0.65, 240, w.H - 60);
-    if (!buildable(t, x, y, 40)) continue;
+    if (!buildable(t, x, y, 40) || smell(w.pher, "danger", x, y) > 2) continue;
     const clear =
       w.houses.every((h) => Math.hypot(h.x - x, (h.y - y) * 1.6) > (h.kind === "house" ? gap : gap + 40)) &&
       w.trees.every((o) => Math.hypot(o.x - x, (o.y - y) * 1.6) > 50) &&
@@ -242,11 +246,14 @@ export function makePerson(w, x, y, extra = {}) {
     carried: false,
     religion: null,
     prophet: false,
+    brain: null,
+    knownTree: null,
     army: null,
     role: null,
     born: w.t,
     ...extra,
   };
+  p.brain ??= newBrain();
   w.names[p.id] = p.name;
   w.people.push(p);
   return p;
@@ -344,6 +351,7 @@ function step1(w, dt) {
   separate(w);
   w.people = w.people.filter((p) => p.alive || w.t - p.diedAt < 20);
   pendingTick(w);
+  evaporate(w.pher, dt);
   weatherTick(w, dt);
   faithTick(w, dt);
   housesTick(w, dt);
@@ -409,6 +417,11 @@ function personTick(w, p, dt) {
     return;
   }
 
+  // Footsteps wear paths; someone coming from food leaves a trail to it.
+  if (Math.abs(p.vx) + Math.abs(p.vy) > 15) {
+    lay(w.pher, "walk", p.x, p.y, dt * 0.15);
+    if (p.trail > w.t) lay(w.pher, "food", p.x, p.y, dt * 3);
+  }
   if (!p.task || w.t > p.task.until) {
     if (w.t >= p.decideAt) {
       p.task = decide(w, p);
@@ -422,6 +435,7 @@ function personTick(w, p, dt) {
 export function hurt(w, p, amount, cause, by = null) {
   if (!p.alive) return;
   p.health -= amount;
+  if (cause !== "گرسنگی" && cause !== "سرما" && cause !== "طاعون") lay(w.pher, "danger", p.x, p.y, Math.min(3, amount * 0.1));
   if (p.health <= 0) die(w, p, cause, by);
 }
 
@@ -435,6 +449,7 @@ function die(w, p, cause, by = null) {
   p.carried = false;
   w.stats.died++;
   const killer = by && byId(w, by);
+  splash(w.pher, "danger", p.x, p.y, 6, 1);
   log(w, `💀 ${p.name} مُرد (${killer ? `به دست ${killer.name}` : cause}).`, p, "death");
   fx(w, "soul", p.x, p.y, 2.5);
   // The ones who loved them grieve; the ones who hated them don't.
@@ -494,7 +509,14 @@ function nearest(list, p, test = () => true, max = Infinity) {
 function decide(w, p) {
   const T = p.traits;
   const opts = [];
-  const add = (score, make) => score > 0 && opts.push([score + rand(0, 0.25), make]);
+  // The brain: what it senses now, and how that tilts each drive.
+  const out = forward(p.brain, senses(w, p)).out;
+  const add = (score, make, drive = "explore") => score > 0 && opts.push([score * tilt(out, drive) + rand(0, 0.25), make, drive]);
+  // Learn from how the last choice turned out.
+  const moodNow = happiness(w, p);
+  if (p.lastDrive) learn(p.brain, p.lastDrive, moodNow - p.lastMood);
+  p.lastMood = moodNow;
+  p.lastDrive = null;
   const until = (s) => w.t + s;
   const adult = isAdult(p);
   const others = w.people.filter((q) => q.alive && q !== p && !q.carried && q.z <= 0);
@@ -517,22 +539,26 @@ function decide(w, p) {
   const fire = nearest(w.houses, p, (h) => h.fire > 0 && !h.ruined, 520);
   if (fire && adult) {
     const mine = fire.owner === p.id || fire.id === p.home || (fire.colony && fire.colony === p.colony);
-    add(mine ? 2.2 : 0.5 * T.kind, () => ({ type: "extinguish", house: fire.id, until: until(20) }));
+    add(mine ? 2.2 : 0.5 * T.kind, () => ({ type: "extinguish", house: fire.id, until: until(20) }), "kind");
   }
   const threat = nearest(near, p, (q) => q.task?.type === "fight" && q.task.target === p.id, 200);
   if (threat) {
     const fightBack = T.brave * 0.8 + T.aggr * 0.6 + (p.health > 50 ? 0.3 : -0.6);
-    add(fightBack, () => ({ type: "fight", target: threat.id, until: until(8) }));
-    add(1.2 - fightBack, () => ({ type: "flee", from: threat.id, until: until(4) }));
+    add(fightBack, () => ({ type: "fight", target: threat.id, until: until(8) }), "fight");
+    add(1.2 - fightBack, () => ({ type: "flee", from: threat.id, until: until(4) }), "flee");
   }
 
   // Body.
   if (p.food < 60) {
-    const tree = nearest(w.trees, p, (t) => t.fruit > 0 && !t.dead && !t.burn);
-    if (tree) add(((60 - p.food) / 60) * 1.8 + (p.food < 20 ? 1 : 0) + (p.food < 10 ? 2 : 0), () => ({ type: "gather", tree: tree.id, until: until(40) }));
+    // Only trees in sight, or one they remember; otherwise follow the trail.
+    const ripe = (t) => t.fruit > 0 && !t.dead && !t.burn;
+    const known = w.trees.find((t) => t.id === p.knownTree);
+    const tree = nearest(w.trees, p, ripe, SIGHT) ?? (known && ripe(known) && dist(known, p) < 1000 ? known : null) ?? (p.food < 12 ? nearest(w.trees, p, ripe) : null);
+    if (!tree) add(((60 - p.food) / 60) * 1.4, () => ({ type: "forage", until: until(25) }), "eat");
+    if (tree) add(((60 - p.food) / 60) * 1.8 + (p.food < 20 ? 1 : 0) + (p.food < 10 ? 2 : 0), () => ({ type: "gather", tree: tree.id, until: until(40) }), "eat");
     else if (p.food < 25 && chance(0.3)) speak(w, p, say("hungry"));
     const spot = fishingSpot(w, p);
-    if (spot) add(((60 - p.food) / 60) * (tree ? 0.9 : 1.6) + (w.season === "winter" ? 0.4 : 0), () => ({ type: "fish", x: spot.x, y: spot.y, until: until(40) }));
+    if (spot) add(((60 - p.food) / 60) * (tree ? 0.9 : 1.6) + (w.season === "winter" ? 0.4 : 0), () => ({ type: "fish", x: spot.x, y: spot.y, until: until(40) }), "eat");
   }
   if (p.energy < 35)
     add(((35 - p.energy) / 35) * 1.6 + 0.2, () => {
@@ -540,44 +566,44 @@ function decide(w, p) {
       return home && home.built >= 1 && !home.ruined && Math.hypot(home.x - p.x, home.y - p.y) < 700
         ? { type: "sleep", x: home.x + rand(-14, 14), y: home.y + 16, until: until(60) }
         : { type: "sleep", x: p.x, y: p.y, until: until(60) };
-    });
+    }, "sleep");
 
   // Coins on the ground: greed.
   const coin = nearest(w.coins, p, (c) => c.z <= 0, 600);
-  if (coin) add(0.5 + T.greed * 1.2, () => ({ type: "collect", coin: coin.id, until: until(15) }));
+  if (coin) add(0.5 + T.greed * 1.2, () => ({ type: "collect", coin: coin.id, until: until(15) }), "work");
 
   if (!adult) {
     // Children stay near a parent and play.
     const parent = p.parents.map((id) => byId(w, id)).find((q) => q?.alive);
-    if (parent) add(0.8, () => ({ type: "follow", target: parent.id, until: until(rand(4, 8)) }));
+    if (parent) add(0.8, () => ({ type: "follow", target: parent.id, until: until(rand(4, 8)) }), "social");
     add(0.4, () => wanderTask(w, p, 160));
     const kid = nearest(near, p, (q) => !isAdult(q), 300);
-    if (kid) add(0.4 * (T.social + 0.5), () => ({ type: "chat", target: kid.id, until: until(12) }));
-    return best(opts) ?? wanderTask(w, p, 120);
+    if (kid) add(0.4 * (T.social + 0.5), () => ({ type: "chat", target: kid.id, until: until(12) }), "social");
+    return best(opts, p) ?? wanderTask(w, p, 120);
   }
 
   // Work and home.
   const rock = nearest(w.rocks, p);
-  if (rock) add(0.35 + T.work * 0.5 + T.greed * 0.3 - p.wealth / 80, () => ({ type: "work", rock: rock.id, until: until(30) }));
+  if (rock) add(0.35 + T.work * 0.5 + T.greed * 0.3 - p.wealth / 80, () => ({ type: "work", rock: rock.id, until: until(30) }), "work");
   const home = p.home && houseOf(w, p.home);
   if (!home || home.ruined) {
     const empty = nearest(w.houses, p, (h) => h.kind === "house" && h.built >= 1 && !h.ruined && h.owner === null, 900);
-    if (empty) add(1.1, () => ({ type: "claim", house: empty.id, until: until(40) }));
-    else if (p.wealth >= HOUSE_COST) add(1.2, () => buildTask(w, p));
-  } else if (home.built < 1) add(1.3, () => ({ type: "build", house: home.id, until: until(40) }));
+    if (empty) add(1.1, () => ({ type: "claim", house: empty.id, until: until(40) }), "home");
+    else if (p.wealth >= HOUSE_COST) add(1.2, () => buildTask(w, p), "home");
+  } else if (home.built < 1) add(1.3, () => ({ type: "build", house: home.id, until: until(40) }), "home");
   else if (home.owner === p.id && home.kind === "house" && home.level < 2 && p.wealth > 45)
-    add(0.9, () => ({ type: "upgrade", house: home.id, until: until(40) }));
+    add(0.9, () => ({ type: "upgrade", house: home.id, until: until(40) }), "home");
   // The tribe's temple or castle going up.
   const works = p.colony && nearest(w.houses, p, (b) => b.colony === p.colony && b.kind !== "house" && b.built < 1 && !b.ruined, 900);
-  if (works) add(0.5 + T.work * 0.4 + (works.kind === "temple" ? T.faith * 0.4 : 0), () => ({ type: "build", house: works.id, until: until(40) }));
+  if (works) add(0.5 + T.work * 0.4 + (works.kind === "temple" ? T.faith * 0.4 : 0), () => ({ type: "build", house: works.id, until: until(40) }), "work");
 
   // People.
   const lonely = (100 - p.social) / 100;
   const friend = pickSocial(p, near);
-  if (friend) add(lonely * (0.6 + T.social) + 0.1, () => ({ type: "chat", target: friend.id, until: until(15) }));
+  if (friend) add(lonely * (0.6 + T.social) + 0.1, () => ({ type: "chat", target: friend.id, until: until(15) }), "social");
   if (!p.spouse && p.age < 58) {
     const love = nearest(near, p, (q) => isAdult(q) && !q.spouse && q.age < 58 && rel(p, q) > 50 && !isFamily(p, q));
-    if (love) add(0.8 + rel(p, love) / 100, () => ({ type: "court", target: love.id, until: until(15) }));
+    if (love) add(0.8 + rel(p, love) / 100, () => ({ type: "court", target: love.id, until: until(15) }), "love");
   }
   const enemy = nearest(near, p, (q) => (rel(p, q) < -40 && T.aggr > 0.45) || (atWar(w, p, q) && isAdult(q)), 480);
   if (enemy) {
@@ -587,21 +613,21 @@ function decide(w, p) {
       target: enemy.id,
       until: until(10),
       war,
-    }));
+    }), "fight");
   }
   if (T.greed > 0.55 && T.kind < 0.55 && p.wealth < 8) {
     const mark = nearest(near, p, (q) => q.wealth > 12 && isAdult(q) && !allied(w, p, q) && q.id !== p.spouse, 450);
-    if (mark) add(T.greed * 0.9 - T.kind * 0.5, () => ({ type: "steal", target: mark.id, until: until(15) }));
+    if (mark) add(T.greed * 0.9 - T.kind * 0.5, () => ({ type: "steal", target: mark.id, until: until(15) }), "crime");
   }
   if (T.kind > 0.55 && p.wealth > 25) {
     const poor = nearest(near, p, (q) => q.wealth < 5 && rel(p, q) > 0 && isAdult(q), 450);
-    if (poor) add(T.kind * 0.6, () => ({ type: "gift", target: poor.id, until: until(15) }));
+    if (poor) add(T.kind * 0.6, () => ({ type: "gift", target: poor.id, until: until(15) }), "kind");
   }
   // At war: raid an enemy house.
   if (p.colony && T.aggr + T.brave > 1) {
     const col = colonyOf(w, p.colony);
     const raid = nearest(w.houses, p, (h) => h.colony && colStatus(col, colonyOf(w, h.colony)) === "war" && !h.ruined && h.built >= 1, 1400);
-    if (raid) add(0.25 + T.aggr * 0.7, () => ({ type: "raid", house: raid.id, until: until(30) }));
+    if (raid) add(0.25 + T.aggr * 0.7, () => ({ type: "raid", house: raid.id, until: until(30) }), "fight");
   }
   // Pray when life is hard (or just devout) — at the temple if there is one.
   const mood = happiness(w, p);
@@ -609,24 +635,60 @@ function decide(w, p) {
     add((mood < -20 ? 0.7 : 0.1) * T.faith * 1.6, () => {
       const temple = p.religion && nearest(w.houses, p, (b) => b.kind === "temple" && b.built >= 1 && !b.ruined && b.religion === p.religion, 700);
       return temple ? { type: "pray", x: temple.x + rand(-50, 50), y: temple.y + rand(20, 45), until: until(20) } : { type: "pray", until: until(5) };
-    });
+    }, "faith");
   // Spread the word.
   if (p.religion && T.faith > 0.6) {
     const soul = nearest(near, p, (q) => isAdult(q) && q.religion !== p.religion && (q.rel[p.id] ?? 0) > -25 && !q.army, 420);
-    if (soul) add((T.faith - 0.5) * (p.prophet ? 2.2 : 1) * (0.5 + T.social), () => ({ type: "preach", target: soul.id, until: until(15) }));
+    if (soul) add((T.faith - 0.5) * (p.prophet ? 2.2 : 1) * (0.5 + T.social), () => ({ type: "preach", target: soul.id, until: until(15) }), "faith");
   }
   // The pilgrimage.
   if (p.religion && T.faith > 0.65 && Math.hypot(p.x - w.holy.x, p.y - w.holy.y) > 500)
-    add(0.12 * T.faith, () => ({ type: "pilgrim", x: w.holy.x + rand(-90, 90), y: w.holy.y + rand(-30, 50), until: until(DAY * 1.2) }));
+    add(0.12 * T.faith, () => ({ type: "pilgrim", x: w.holy.x + rand(-90, 90), y: w.holy.y + rand(-30, 50), until: until(DAY * 1.2) }), "faith");
 
   add(0.22, () => wanderTask(w, p, 300));
-  return best(opts) ?? wanderTask(w, p, 200);
+  return best(opts, p) ?? wanderTask(w, p, 200);
 }
 
-function best(opts) {
+function best(opts, p) {
   if (!opts.length) return null;
   opts.sort((a, b) => b[0] - a[0]);
+  if (p) p.lastDrive = opts[0][2];
   return opts[0][1]();
+}
+
+// What a person senses, for their brain: all in -1..1.
+export function senses(w, p) {
+  let threat = 0;
+  let enemy = 0;
+  let friend = 0;
+  for (const q of w.people) {
+    if (!q.alive || q === p) continue;
+    const d = Math.abs(q.x - p.x) + Math.abs(q.y - p.y);
+    if (d > 500) continue;
+    if (q.task?.target === p.id && q.task.type === "fight") threat = 1;
+    const r = p.rel[q.id] ?? 0;
+    if (r < -40 || (q.army && q.religion !== p.religion)) enemy = 1;
+    if (r > 40) friend = 1;
+  }
+  const hour = (w.t % DAY) / DAY;
+  const home = p.home && houseOf(w, p.home);
+  const s = (v) => v * 2 - 1;
+  return [
+    s(p.food / 100),
+    s(p.energy / 100),
+    s(p.health / 100),
+    s(p.social / 100),
+    s(Math.min(p.wealth, 60) / 60),
+    happiness(w, p) / 100,
+    s(threat),
+    s(enemy),
+    s(friend),
+    s(hour > 0.72 && hour < 0.96 ? 1 : 0),
+    s(w.season === "winter" ? 1 : 0),
+    s(home && home.built >= 1 && !home.ruined ? 1 : 0),
+    s(p.spouse ? 1 : 0),
+    s(Math.min(1, smell(w.pher, "danger", p.x, p.y) / 4)),
+  ];
 }
 
 const isFamily = (a, b) =>
@@ -666,7 +728,14 @@ function wanderTask(w, p, r) {
   const home = p.home && houseOf(w, p.home);
   const cx = home && !home.ruined && chance(0.6) ? home.x : p.x;
   const cy = home && !home.ruined && chance(0.6) ? home.y + 30 : p.y;
-  return { type: "wander", x: cx + rand(-r, r), y: cy + rand(-r * 0.6, r * 0.6), until: w.t + rand(6, 14) };
+  // Of a few places to stroll to, the one that smells least of danger.
+  let best = null;
+  for (let i = 0; i < 3; i++) {
+    const c = { x: cx + rand(-r, r), y: cy + rand(-r * 0.6, r * 0.6) };
+    c.d = smell(w.pher, "danger", c.x, c.y);
+    if (!best || c.d < best.d) best = c;
+  }
+  return { type: "wander", x: best.x, y: best.y, until: w.t + rand(6, 14) };
 }
 
 function buildTask(w, p) {
@@ -708,6 +777,17 @@ function runTask(w, p, dt) {
       if (arrived(p)) k.idle = (k.idle ?? rand(1, 3)) - dt;
       if (k.idle < 0) done(p);
       return;
+    case "forage": {
+      // Like an ant: follow the food trail cell by cell until a tree is in sight.
+      const tree = nearest(w.trees, p, (t) => t.fruit > 0 && !t.dead && !t.burn, SIGHT);
+      if (tree) {
+        p.task = { type: "gather", tree: tree.id, until: w.t + 40 };
+        return;
+      }
+      if (!k.step || arrived(p, 16)) k.step = sniff(w.pher, p.x, p.y, "food") ?? { x: p.x + rand(-80, 80), y: p.y + rand(-50, 50) };
+      goTo(p, k.step.x, k.step.y);
+      return;
+    }
     case "fish":
       goTo(p, k.x, k.y);
       if (arrived(p, 18)) {
@@ -718,6 +798,7 @@ function runTask(w, p, dt) {
         if (k.left < 0) {
           if (chance(0.75)) {
             p.food = Math.min(100, p.food + 40);
+            p.trail = w.t + 15;
             fx(w, "pop", p.x, p.y - 70, 0.8, { text: "🐟" });
           }
           done(p);
@@ -810,6 +891,8 @@ function runTask(w, p, dt) {
         if (k.eat < 0) {
           tree.fruit--;
           p.food = Math.min(100, p.food + 50);
+          p.knownTree = tree.id;
+          p.trail = w.t + 20; // walk away laying a trail back to it
           fx(w, "pop", tree.x, tree.y - 60, 0.6, { text: "🍎" });
           done(p);
         }
@@ -1158,6 +1241,31 @@ function move(w, p, dt) {
     p.vx += ((dx / d) * sp - p.vx) * Math.min(1, dt * 6);
     p.vy += ((dy / d) * sp * 0.75 - p.vy) * Math.min(1, dt * 6);
   }
+  // Boids: marching soldiers and fleeing crowds match their neighbours'
+  // heading and keep together, like a flock.
+  if (k && (k.type === "march" || k.type === "flee") && !still) {
+    let ax = 0;
+    let ay = 0;
+    let cx = 0;
+    let cy = 0;
+    let n = 0;
+    for (const q of w.people) {
+      if (q === p || !q.alive || q.task?.type !== k.type || (k.type === "march" && q.army !== p.army)) continue;
+      const dx = q.x - p.x;
+      const dy = q.y - p.y;
+      if (dx * dx + dy * dy > 110 * 110) continue;
+      ax += q.vx;
+      ay += q.vy;
+      cx += dx;
+      cy += dy;
+      n++;
+    }
+    if (n) {
+      const m = Math.min(1, dt * 2.5);
+      p.vx += (ax / n - p.vx) * m * 0.5 + (cx / n) * m * 0.2;
+      p.vy += (ay / n - p.vy) * m * 0.5 + (cy / n) * m * 0.2;
+    }
+  }
   p.x += p.vx * dt;
   p.y += p.vy * dt;
   const v = Math.hypot(p.vx, p.vy);
@@ -1252,6 +1360,7 @@ function births(w) {
       home: home.id,
       colony: a.colony ?? b.colony,
       religion: a.religion ?? b.religion,
+      brain: childBrain(a.brain, b.brain),
     });
     a.kids.push(kid.id);
     b.kids.push(kid.id);

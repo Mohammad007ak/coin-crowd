@@ -26,6 +26,8 @@ import { hitPerson, moodOf, personHeight, render, renderMini, toWorld } from "./
 import { MODELS, pickThinker, think } from "./mind.js";
 import { SHAPE_NAMES, clamp, fa, pick } from "./util.js";
 import { followersOf, religionOf, revelation } from "./crusade.js";
+import { DRIVES, NET, SENSES, forward } from "./brain.js";
+import { senses } from "./world.js";
 import { WEATHERS, seasonOf } from "./terrain.js";
 import "./game.css";
 
@@ -94,7 +96,7 @@ export default function Game() {
   const worldRef = useRef(null);
   if (!worldRef.current) {
     const saved = load(SAVE_KEY, null);
-    worldRef.current = saved?.version === 2 ? revive(saved) : createWorld();
+    worldRef.current = saved?.version === 3 ? revive(saved) : createWorld();
   }
   // Start looking at the western town.
   const camRef = useRef({ x: worldRef.current.W * 0.3, y: worldRef.current.H * 0.45, zoom: 0.75 });
@@ -109,6 +111,9 @@ export default function Game() {
   const [ai, setAi] = useState({ busy: false, error: "", calls: 0, input: 0, output: 0 });
   const [whisper, setWhisper] = useState("");
   const [talking, setTalking] = useState(false);
+  const [trails, setTrails] = useState(false);
+  const trailsRef = useRef(trails);
+  trailsRef.current = trails;
   // Big news, shown across the screen for a few seconds each.
   const [news, setNews] = useState([]);
   const seenNews = useRef(worldRef.current.announcements.at(-1)?.id ?? 0);
@@ -156,7 +161,7 @@ export default function Game() {
       }
       keys(cam, dt);
       clampCam(cam, w, vw, vh);
-      render(ctx, w, cam, vw, vh, { selected: selectedRef.current, now });
+      render(ctx, w, cam, vw, vh, { selected: selectedRef.current, now, trails: trailsRef.current });
       const mini = miniRef.current;
       if (mini) renderMini(mini.getContext("2d"), w, cam, vw, vh, mini.width, mini.height);
       raf = requestAnimationFrame(frame);
@@ -468,6 +473,7 @@ export default function Game() {
             {WEATHERS[w.weather.type].icon}
           </span>
           <span title="جمعیت">👥 {fa(living.length)}</span>
+          <span title="بالاترین نسلِ مغزها (تکامل)">🧬 {fa(Math.max(1, ...living.map((p) => p.brain?.gen ?? 1)))}</span>
           <span title="شهر مقدس" className="holy-chip" style={{ "--c": holyOwner?.color ?? "#999" }}>
             🏛️ {holyOwner ? holyOwner.symbol : "—"}
             {w.holy.contender && w.holy.progress > 0 && <i style={{ width: `${w.holy.progress * 100}%` }} />}
@@ -487,6 +493,9 @@ export default function Game() {
           ))}
         </div>
         <div className="menu">
+          <button className={trails ? "on" : ""} onClick={() => setTrails(!trails)} title="ردّ غذا (سبز) و بوی خطر (قرمز)، مثل مورچه‌ها">
+            🐜 <span>ردپاها</span>
+          </button>
           <button className={panel === "log" ? "on" : ""} onClick={() => setPanel(panel === "log" ? null : "log")}>
             📜 <span>رویدادها</span>
           </button>
@@ -606,12 +615,22 @@ export default function Game() {
       {panel === "settings" && (
         <aside className="panel side settings">
           <div className="panel-head">
-            <strong>ذهن‌های هوشمند</strong>
+            <strong>هوش آدم‌ها</strong>
             <button onClick={() => setPanel(null)}>✕</button>
           </div>
           <p className="muted">
-            بدون هوش مصنوعی هم دنیا زنده است: آدم‌ها با شخصیت و نیازهایشان تصمیم می‌گیرند. با یک کلید API از Anthropic، هر چند ثانیه ذهن یکی از آن‌ها با Claude
-            فکر می‌کند (با خاطرات، کینه‌ها و عشق‌هایش) و می‌توانید مستقیم با آن‌ها حرف بزنید.
+            <b>🧠 مغزِ شبکه‌ی عصبی (رایگان، همیشه روشن):</b> هر آدم یک شبکه‌ی عصبی کوچک دارد که حالش را می‌خواند و خواسته‌هایش را کم و زیاد می‌کند. از تجربه یاد
+            می‌گیرد (کاری که شادش کرده را بیشتر می‌خواهد) و بچه‌ها ترکیبی جهش‌یافته از مغز پدر و مادر را به ارث می‌برند؛ پس نسل به نسل تکامل پیدا می‌کنند.
+          </p>
+          <p className="muted">
+            <b>🐜 الگوریتم مورچه‌ها:</b> آدم‌ها فقط درخت‌های نزدیک را می‌بینند. هر کس غذا پیدا کند ردّ غذا می‌گذارد و گرسنه‌ها آن را دنبال می‌کنند؛ جای دعوا و مرگ
+            بوی خطر می‌گیرد و از آن دوری می‌کنند؛ قدم‌ها روی زمین راه می‌سازند. <b>🐦 الگوریتم پرندگان (Boids):</b> پرنده‌ها، سپاه‌های در حال حرکت و جمعیتِ فراری
+            مثل یک گله با هم حرکت می‌کنند.
+          </p>
+          <hr />
+          <p className="muted">
+            <b>اختیاری — حرف زدن واقعی با Claude:</b> با یک کلید API از Anthropic، هر چند ثانیه ذهن یکی از آدم‌ها با Claude فکر می‌کند (با خاطرات، کینه‌ها و
+            عشق‌هایش) و می‌توانید مستقیم با آن‌ها حرف بزنید.
           </p>
           <label>
             کلید API
@@ -813,6 +832,10 @@ function PersonPanel({ w, p, ai, talking, whisper, setWhisper, onSpeak, select, 
           </div>
 
           <details open>
+            <summary>🧠 مغز · نسل {fa(p.brain?.gen ?? 1)}</summary>
+            {p.brain && <BrainView w={w} p={p} />}
+          </details>
+          <details open>
             <summary>شخصیت</summary>
             <div className="bars traits">
               {TRAITS.map(([key, label]) => (
@@ -855,6 +878,57 @@ function PersonPanel({ w, p, ai, talking, whisper, setWhisper, onSpeak, select, 
 }
 
 // Never show what lies beyond the edge of the world.
+// The person's neural network, live: what it senses (right), its hidden
+// layer, and how strongly it wants each thing (left). Lines are weights:
+// blue pushes up, red pushes down.
+function BrainView({ w, p }) {
+  const { x, hidden, out } = forward(p.brain, senses(w, p));
+  const W_ = 300;
+  const rowIn = 17;
+  const H_ = SENSES.length * rowIn + 8;
+  const xs = [212, 150, 88];
+  const yIn = (i) => 8 + i * rowIn;
+  const yHid = (h) => 8 + (h + 0.5) * ((H_ - 16) / NET.NH);
+  const yOut = (o) => 8 + (o + 0.5) * ((H_ - 16) / NET.NO);
+  const col = (v, a = 1) => (v >= 0 ? `rgba(10,108,255,${a})` : `rgba(255,75,62,${a})`);
+  const top = out.indexOf(Math.max(...out));
+  return (
+    <svg className="brain" viewBox={`0 0 ${W_} ${H_}`} role="img" aria-label="شبکه‌ی عصبی">
+      {hidden.map((_, h) =>
+        SENSES.map((__, i) => {
+          const wt = p.brain.w1[h * NET.NI + i];
+          return <line key={`a${h}-${i}`} x1={xs[0]} y1={yIn(i)} x2={xs[1]} y2={yHid(h)} stroke={col(wt, Math.min(0.7, Math.abs(wt * x[i]) * 0.9 + 0.04))} strokeWidth="1" />;
+        }),
+      )}
+      {out.map((_, o) =>
+        hidden.map((hv, h) => {
+          const wt = p.brain.w2[o * NET.NH + h];
+          return <line key={`b${o}-${h}`} x1={xs[1]} y1={yHid(h)} x2={xs[2]} y2={yOut(o)} stroke={col(wt, Math.min(0.8, Math.abs(wt * hv) * 1.2 + 0.04))} strokeWidth="1.2" />;
+        }),
+      )}
+      {SENSES.map(([, label], i) => (
+        <g key={`i${i}`}>
+          <circle cx={xs[0]} cy={yIn(i)} r="4" fill={col(x[i], 0.2 + Math.abs(x[i]) * 0.8)} stroke="#111126" strokeWidth="1" />
+          <text x={xs[0] + 8} y={yIn(i) + 3.5} fontSize="11" textAnchor="start">
+            {label}
+          </text>
+        </g>
+      ))}
+      {hidden.map((v, h) => (
+        <circle key={`h${h}`} cx={xs[1]} cy={yHid(h)} r="5" fill={col(v, 0.15 + Math.abs(v) * 0.85)} stroke="#111126" strokeWidth="1" />
+      ))}
+      {DRIVES.map(([, label, icon], o) => (
+        <g key={`o${o}`}>
+          <circle cx={xs[2]} cy={yOut(o)} r={4 + Math.max(0, out[o]) * 4} fill={col(out[o], 0.2 + Math.abs(out[o]) * 0.8)} stroke="#111126" strokeWidth={o === top ? 2.5 : 1} />
+          <text x={xs[2] - 9} y={yOut(o) + 3.5} fontSize="11" textAnchor="end" fontWeight={o === top ? 900 : 400}>
+            {label} {icon}
+          </text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
 function clampCam(cam, w, vw, vh) {
   if (!vw || !vh) return;
   cam.zoom = clamp(cam.zoom, Math.max(vw / w.W, vh / w.H), 2.5);
